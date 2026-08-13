@@ -88,13 +88,13 @@ The Unix installer uses `curl`; the PowerShell installer uses PowerShell's nativ
 Unix-style shell:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Saniee/swmctl/master/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Saniee/swmctl/refs/heads/master/scripts/install.sh | sh
 ```
 
 PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/Saniee/swmctl/master/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/Saniee/swmctl/refs/heads/master/scripts/install.ps1 | iex
 ```
 
 Set `SWMCTL_REPOSITORY` when installing from a fork.
