@@ -91,6 +91,12 @@ Unix-style shell:
 curl -fsSL https://raw.githubusercontent.com/Saniee/swmctl/refs/heads/master/scripts/install.sh | sh
 ```
 
+If `swmctl` is not found after installation, add its user-local bin directory to `PATH`:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
 PowerShell:
 
 ```powershell

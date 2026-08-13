@@ -35,3 +35,7 @@ install_dir="${SWMCTL_INSTALL_DIR:-$HOME/.local/bin}"
 mkdir -p "$install_dir"
 install -m 755 "$tmp_dir/$asset" "$install_dir/swmctl"
 printf 'Installed swmctl %s to %s\n' "$tag" "$install_dir/swmctl"
+case ":$PATH:" in
+    *":$install_dir:"*) ;;
+    *) printf 'Add this directory to PATH before running swmctl:\n  export PATH="%s:$PATH"\n' "$install_dir" ;;
+esac
