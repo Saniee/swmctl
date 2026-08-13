@@ -1,5 +1,4 @@
-# swmctl
-
+# swmctl - Steam Workshop Manager Control (Steward)
 [![CI](https://github.com/Saniee/swmctl/actions/workflows/ci.yml/badge.svg)](https://github.com/Saniee/swmctl/actions/workflows/ci.yml)
 [![Build](https://github.com/Saniee/swmctl/actions/workflows/release.yml/badge.svg)](https://github.com/Saniee/swmctl/actions/workflows/release.yml)
 
