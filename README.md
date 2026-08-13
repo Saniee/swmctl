@@ -1,5 +1,8 @@
 # swmctl
 
+[![CI](https://github.com/Saniee/swmctl/actions/workflows/ci.yml/badge.svg)](https://github.com/Saniee/swmctl/actions/workflows/ci.yml)
+[![Build](https://github.com/Saniee/swmctl/actions/workflows/release.yml/badge.svg)](https://github.com/Saniee/swmctl/actions/workflows/release.yml)
+
 `swmctl` is a command-line tool for keeping Steam Workshop mods synchronized with a local game-server directory.
 
 It uses SteamCMD as the source of truth, compares Workshop metadata with a local manifest, and performs only the downloads, updates, and deletes required to reach the requested state.
