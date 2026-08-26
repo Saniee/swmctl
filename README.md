@@ -156,11 +156,11 @@ Both installers accept an optional version override. Because the one-line forms
 above pipe the script into a shell, the version is passed through that shell:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Saniee/swmctl/refs/heads/master/scripts/install.sh | sh -s -- v0.1.0
+curl -fsSL https://raw.githubusercontent.com/Saniee/swmctl/refs/heads/master/scripts/install.sh | sh -s -- v0.2.0
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Saniee/swmctl/refs/heads/master/scripts/install.ps1))) -Version v0.1.0
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Saniee/swmctl/refs/heads/master/scripts/install.ps1))) -Version v0.2.0
 ```
 
 Uninstall removes only the binary; configuration, manifests, and downloaded mods are preserved.
