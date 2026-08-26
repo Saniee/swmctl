@@ -126,6 +126,11 @@ Useful options include `--output`, `--manifest`, `--steamcmd`, `--steamcmd-dir`,
 `--name-mode`, `--name-prefix`, `--max-retries`, `--retry-delay`, `--dry-run`,
 and `--quiet`.
 
+A relative `--steamcmd-dir` is resolved against the working directory before it
+is handed to SteamCMD, which would otherwise place the staged files under its
+own installation directory. The resolved path is printed at the start of each
+run.
+
 ## Installation
 
 Release binaries are published for Linux and Windows. The installers download the latest release and install it to a user-local directory.

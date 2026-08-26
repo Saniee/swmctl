@@ -3,6 +3,7 @@ pub mod cli;
 pub mod manifest;
 pub mod metadata;
 pub mod naming;
+pub mod paths;
 pub mod placement;
 pub mod steam_api;
 pub mod steamcmd;
