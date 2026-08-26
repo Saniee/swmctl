@@ -13,6 +13,7 @@ use crate::manifest::{
 };
 use crate::metadata::read_acf;
 use crate::naming::{NameMode, directory_name};
+use crate::paths::absolute;
 use crate::placement::{directory_size, place_mod};
 use crate::steam_api::{fetch_collection_items, fetch_published_files};
 use crate::steamcmd::{SteamCmd, SteamCmdError, workshop_content_path, workshop_download_path};
@@ -150,8 +151,19 @@ impl Reporter {
     }
 }
 
-fn run_sync(args: SyncArgs) -> Result<(), Error> {
+fn run_sync(mut args: SyncArgs) -> Result<(), Error> {
     let report = Reporter { quiet: args.quiet };
+
+    // SteamCMD resolves a relative `+force_install_dir` against its own
+    // installation directory, while swmctl reads the staged files back
+    // relative to the working directory. Left relative, the two disagree and
+    // every item is reported as "SteamCMD did not produce a download".
+    args.steamcmd_dir = absolute(&args.steamcmd_dir).map_err(|error| {
+        format!(
+            "could not resolve --steamcmd-dir {}: {error}",
+            args.steamcmd_dir.display()
+        )
+    })?;
 
     let requested = resolve_requested(&args)?;
     if requested.is_empty() {
@@ -228,6 +240,7 @@ fn run_sync(args: SyncArgs) -> Result<(), Error> {
     report.log(&format!("To download : {}", pending.len()));
     report.log(&format!("To delete   : {}", doomed.len()));
     report.log(&format!("Output      : {}", args.output.display()));
+    report.log(&format!("SteamCMD dir: {}", args.steamcmd_dir.display()));
 
     if args.dry_run {
         for action in &actions {
