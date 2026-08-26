@@ -21,7 +21,10 @@ pub struct RemoteMod {
     pub mod_id: String,
     pub file_size: u64,
     pub last_updated: Option<i64>,
-    pub available: bool,
+    /// `true` when Steam positively reported the item as deleted. An item that
+    /// is merely invisible to an unauthenticated request is not unavailable —
+    /// SteamCMD may still fetch it with credentials.
+    pub deleted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,11 +76,25 @@ pub fn load(path: &Path) -> Result<Vec<ManifestEntry>, ManifestError> {
     })
 }
 
+/// Write the manifest atomically. It is the only record of which directories
+/// are managed, so a partial write must never replace a good one.
 pub fn save(path: &Path, entries: &[ManifestEntry]) -> Result<(), ManifestError> {
     let contents = serde_json::to_string(entries).map_err(ManifestError::Serialize)?;
-    fs::write(path, contents).map_err(|source| ManifestError::Write {
+    let temporary = path.with_extension("json.tmp");
+    let write = |source| ManifestError::Write {
         path: path.display().to_string(),
         source,
+    };
+
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(write)?;
+    }
+    fs::write(&temporary, contents).map_err(write)?;
+    fs::rename(&temporary, path).map_err(|source| {
+        let _ = fs::remove_file(&temporary);
+        write(source)
     })
 }
 
@@ -113,8 +130,10 @@ pub fn plan(
     for entry in existing {
         let requested = requested_ids.iter().any(|id| id == &entry.mod_id);
         let current = remote.iter().find(|item| item.mod_id == entry.mod_id);
+        // An entry with no remote record was not asked about this run; that is
+        // "unknown", never "unavailable".
         let should_delete = (!requested && delete_unrequested)
-            || (delete_unavailable && current.is_some_and(|item| !item.available));
+            || (delete_unavailable && current.is_some_and(|item| item.deleted));
         if should_delete {
             actions.push(PlannedAction {
                 action: Action::Delete,
@@ -147,7 +166,18 @@ mod tests {
             mod_id: id.into(),
             file_size: size,
             last_updated: Some(updated),
-            available: true,
+            deleted: false,
+        }
+    }
+
+    fn entry(id: &str) -> ManifestEntry {
+        ManifestEntry {
+            downloaded_at: "today".into(),
+            name: id.into(),
+            mod_id: id.into(),
+            file_size: 1,
+            last_updated: Some(1),
+            directory_name: id.into(),
         }
     }
 
@@ -163,24 +193,7 @@ mod tests {
 
     #[test]
     fn plans_update_and_configurable_delete() {
-        let existing = vec![
-            ManifestEntry {
-                downloaded_at: "today".into(),
-                name: "old".into(),
-                mod_id: "old".into(),
-                file_size: 1,
-                last_updated: Some(1),
-                directory_name: "old".into(),
-            },
-            ManifestEntry {
-                downloaded_at: "today".into(),
-                name: "missing".into(),
-                mod_id: "missing".into(),
-                file_size: 1,
-                last_updated: Some(1),
-                directory_name: "missing".into(),
-            },
-        ];
+        let existing = vec![entry("old"), entry("missing")];
         let remote = vec![remote("old", 10, 2)];
         let requested = vec!["old".into()];
         let actions = plan(&requested, &remote, &existing, true, false);
@@ -193,6 +206,55 @@ mod tests {
             action: Action::Delete,
             mod_id: "missing".into()
         }));
+    }
+
+    /// Regression for the `--delete-unavailable` data-loss bug: a mod that is
+    /// simply absent from this run's request list has no remote record, and
+    /// must never be mistaken for one Steam reported as deleted.
+    #[test]
+    fn delete_unavailable_spares_mods_that_were_merely_not_requested() {
+        let existing = vec![entry("999")];
+        let requested = vec!["111".to_string()];
+        let remote = vec![remote("111", 1, 1)];
+
+        let actions = plan(&requested, &remote, &existing, false, true);
+
+        assert!(
+            !actions
+                .iter()
+                .any(|action| action.action == Action::Delete && action.mod_id == "999"),
+            "an unrequested mod must not be deleted by --delete-unavailable"
+        );
+    }
+
+    #[test]
+    fn delete_unavailable_removes_mods_steam_reports_as_deleted() {
+        let existing = vec![entry("gone")];
+        let requested = vec!["gone".to_string()];
+        let remote = vec![RemoteMod {
+            deleted: true,
+            ..remote("gone", 1, 1)
+        }];
+
+        let actions = plan(&requested, &remote, &existing, false, true);
+
+        assert!(actions.contains(&PlannedAction {
+            action: Action::Delete,
+            mod_id: "gone".into()
+        }));
+    }
+
+    /// A login-gated item is invisible to the unauthenticated details request,
+    /// but SteamCMD can still fetch it with credentials.
+    #[test]
+    fn delete_unavailable_spares_items_that_are_only_invisible() {
+        let existing = vec![entry("private")];
+        let requested = vec!["private".to_string()];
+        let remote = vec![remote("private", 1, 1)];
+
+        let actions = plan(&requested, &remote, &existing, false, true);
+
+        assert!(!actions.iter().any(|action| action.action == Action::Delete));
     }
 
     #[test]

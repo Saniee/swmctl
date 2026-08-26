@@ -33,6 +33,12 @@ try {
     New-Item -ItemType Directory -Force -Path $installDir | Out-Null
     Copy-Item $binaryPath (Join-Path $installDir "swmctl.exe") -Force
     Write-Output "Installed swmctl $tag to $(Join-Path $installDir 'swmctl.exe')"
+
+    $onPath = ($env:PATH -split ';' | Where-Object { $_.TrimEnd('\') -eq $installDir.TrimEnd('\') })
+    if (-not $onPath) {
+        Write-Output "Add this directory to PATH before running swmctl:"
+        Write-Output "  setx PATH `"$installDir;`$env:PATH`""
+    }
 } finally {
     Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
 }

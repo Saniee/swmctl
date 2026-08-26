@@ -4,8 +4,6 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use crate::manifest::RemoteMod;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkshopMetadata {
     pub mod_id: String,
@@ -22,6 +20,16 @@ pub enum MetadataError {
     },
 }
 
+/// Sections of `appworkshop_<appid>.acf` that hold per-item records.
+/// SteamCMD writes installed sizes under `WorkshopItemsInstalled` and
+/// timestamps under `WorkshopItemDetails`; both are keyed by Workshop ID.
+const ITEM_SECTIONS: [&str; 3] = [
+    "WorkshopItemsInstalled",
+    "WorkshopItemDetails",
+    // Older SteamCMD builds used this name.
+    "WorkshopItems",
+];
+
 pub fn read_acf(path: &Path) -> Result<Vec<WorkshopMetadata>, MetadataError> {
     if !path.exists() {
         return Ok(Vec::new());
@@ -35,27 +43,52 @@ pub fn read_acf(path: &Path) -> Result<Vec<WorkshopMetadata>, MetadataError> {
 
 pub fn parse_acf(contents: &str) -> Vec<WorkshopMetadata> {
     let mut items = HashMap::<String, HashMap<String, String>>::new();
-    let mut current_id = None;
-    let mut in_items = false;
+    let mut current_id: Option<String> = None;
+    // Depth of the brace we entered the item section at, so the section is
+    // closed again rather than swallowing everything that follows it.
+    let mut section_depth: Option<usize> = None;
+    let mut depth = 0usize;
 
     for line in contents.lines() {
         let tokens = quoted_tokens(line);
         match tokens.as_slice() {
-            [key] if key == "WorkshopItems" => in_items = true,
-            [key] if in_items && key.chars().all(|character| character.is_ascii_digit()) => {
+            [key] if ITEM_SECTIONS.contains(&key.as_str()) => section_depth = Some(depth),
+            [key]
+                if section_depth.is_some()
+                    && key.chars().all(|character| character.is_ascii_digit()) =>
+            {
                 current_id = Some(key.clone());
                 items.entry(key.clone()).or_default();
             }
-            [key, value] if in_items && key != "WorkshopItems" => {
-                if current_id.is_some() {
+            [key, value] => {
+                if let Some(id) = &current_id
+                    && section_depth.is_some()
+                {
                     items
-                        .entry(current_id.clone().unwrap())
+                        .entry(id.clone())
                         .or_default()
                         .insert(key.clone(), value.clone());
                 }
             }
-            _ if line.contains('}') && current_id.is_some() => current_id = None,
             _ => {}
+        }
+
+        for character in line.chars() {
+            match character {
+                '{' => depth += 1,
+                '}' => {
+                    depth = depth.saturating_sub(1);
+                    if let Some(start) = section_depth {
+                        if depth <= start {
+                            section_depth = None;
+                            current_id = None;
+                        } else if depth == start + 1 {
+                            current_id = None;
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -74,22 +107,6 @@ pub fn parse_acf(contents: &str) -> Vec<WorkshopMetadata> {
         .collect::<Vec<_>>();
     result.sort_by(|left, right| left.mod_id.cmp(&right.mod_id));
     result
-}
-
-pub fn requested_remote(requested_ids: &[String], metadata: &[WorkshopMetadata]) -> Vec<RemoteMod> {
-    requested_ids
-        .iter()
-        .map(|mod_id| {
-            let item = metadata.iter().find(|item| item.mod_id == *mod_id);
-            RemoteMod {
-                name: mod_id.clone(),
-                mod_id: mod_id.clone(),
-                file_size: item.map_or(0, |item| item.file_size),
-                last_updated: item.and_then(|item| item.last_updated),
-                available: item.is_some(),
-            }
-        })
-        .collect()
 }
 
 fn quoted_tokens(line: &str) -> Vec<String> {
@@ -114,8 +131,74 @@ fn quoted_tokens(line: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// Verbatim shape of an `appworkshop_107410.acf` written by SteamCMD,
+    /// including the surrounding `AppWorkshop` block and the trailing
+    /// `WorkshopItemDetails` section.
+    const REAL_ACF: &str = r#"
+"AppWorkshop"
+{
+	"appid"		"107410"
+	"SizeOnDisk"		"3742403"
+	"NeedsUpdate"		"0"
+	"NeedsDownload"		"0"
+	"TimeLastUpdated"		"1548969100"
+	"WorkshopItemsInstalled"
+	{
+		"463939057"
+		{
+			"size"		"3742403"
+			"timeupdated"		"1548969057"
+			"manifest"		"7847265094"
+		}
+		"450814997"
+		{
+			"size"		"120"
+			"timeupdated"		"1548969058"
+			"manifest"		"7847265095"
+		}
+	}
+	"WorkshopItemDetails"
+	{
+		"463939057"
+		{
+			"manifest"		"7847265094"
+			"timeupdated"		"1548969057"
+			"timetouched"		"1548969099"
+		}
+	}
+}
+"#;
+
     #[test]
-    fn parses_workshop_item_metadata() {
+    fn parses_a_real_steamcmd_manifest() {
+        assert_eq!(
+            parse_acf(REAL_ACF),
+            vec![
+                WorkshopMetadata {
+                    mod_id: "450814997".into(),
+                    file_size: 120,
+                    last_updated: Some(1548969058),
+                },
+                WorkshopMetadata {
+                    mod_id: "463939057".into(),
+                    file_size: 3742403,
+                    last_updated: Some(1548969057),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn ignores_keys_outside_the_item_sections() {
+        // `appid` and `SizeOnDisk` sit beside the item sections and must not be
+        // mistaken for item records.
+        let parsed = parse_acf(REAL_ACF);
+        assert!(parsed.iter().all(|item| item.mod_id != "107410"));
+        assert_eq!(parsed.len(), 2);
+    }
+
+    #[test]
+    fn parses_the_legacy_section_name() {
         let contents = r#"
             "WorkshopItems"
             {

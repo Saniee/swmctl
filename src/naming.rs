@@ -29,8 +29,8 @@ pub fn sanitize_name(name: &str) -> String {
     result
 }
 
-pub fn directory_name(mode: NameMode, mod_id: &str, name: &str) -> String {
-    match mode {
+pub fn directory_name(mode: NameMode, mod_id: &str, name: &str, prefix: &str) -> String {
+    let stem = match mode {
         NameMode::ModId => mod_id.to_string(),
         NameMode::Name => {
             let sanitized = sanitize_name(name);
@@ -40,7 +40,8 @@ pub fn directory_name(mode: NameMode, mod_id: &str, name: &str) -> String {
                 sanitized
             }
         }
-    }
+    };
+    format!("{prefix}{stem}")
 }
 
 #[cfg(test)]
@@ -54,6 +55,20 @@ mod tests {
 
     #[test]
     fn falls_back_to_id_for_empty_names() {
-        assert_eq!(directory_name(NameMode::Name, "123", "!!!"), "123");
+        assert_eq!(directory_name(NameMode::Name, "123", "!!!", ""), "123");
+    }
+
+    #[test]
+    fn applies_prefix_in_both_modes() {
+        assert_eq!(
+            directory_name(NameMode::Name, "123", "ACE 3", "@"),
+            "@ace_3"
+        );
+        assert_eq!(directory_name(NameMode::ModId, "123", "ACE 3", "@"), "@123");
+    }
+
+    #[test]
+    fn prefix_survives_the_empty_name_fallback() {
+        assert_eq!(directory_name(NameMode::Name, "123", "!!!", "@"), "@123");
     }
 }
