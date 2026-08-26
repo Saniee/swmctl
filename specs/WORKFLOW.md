@@ -10,9 +10,26 @@ output is safe for restrictive game servers.
 
 ## Core workflow
 
-1. **Gather info via SteamCMD**
-For a given mod ID, text file of mod IDs, or Steam Workshop collection, query SteamCMD for current
-   Workshop metadata (title, size, last-updated timestamp, etc.).
+1. **Gather metadata**
+   For a given mod ID, text file of mod IDs, or Steam Workshop collection,
+   gather current Workshop metadata (title, size, last-updated timestamp).
+
+   Two sources are used, in this order:
+
+   - The public Steam Web API (`GetPublishedFileDetails`). SteamCMD's own
+     metadata only covers items already downloaded, so it cannot describe a
+     mod being requested for the first time; the Web API can. It is queried
+     anonymously and in batches.
+   - SteamCMD's `appworkshop_<appid>.acf`, used to fill in size and timestamp
+     when the Web API is unavailable or omits them.
+
+   The Web API is read-only metadata and is never used for authentication —
+   downloads remain entirely SteamCMD's responsibility. Because the request is
+   anonymous, private and login-gated items are invisible to it; such items are
+   treated as *unknown*, never as unavailable, so they are never deleted.
+
+   When the Web API cannot be reached, planning falls back to the ACF data and
+   the existing manifest rather than re-downloading everything.
 
 2. **Diff against the manifest**
    Compare the fetched info against the existing local manifest (if one
@@ -20,11 +37,15 @@ For a given mod ID, text file of mod IDs, or Steam Workshop collection, query St
    - **Download** — not present locally
    - **Update** — present, but remote version is newer
    - **Delete** — present locally, and either no longer in the requested
-     list, and/or (if enabled) no longer available on the Workshop.
-     Each check is independently configurable (on/off).
+     list, and/or (if enabled) reported deleted by the Workshop.
+     Each check is independently configurable (on/off), and a mod absent
+     from the current request is never treated as unavailable.
 
 3. **Execute via SteamCMD**
    For anything flagged download/update, fetch the mod through SteamCMD.
+   SteamCMD may exit successfully while silently omitting individual items, so
+   what actually arrived on disk is checked per item and only the missing ones
+   are retried, up to `--max-retries`.
 
 4. **Place and rename**
    Once a download finishes, move the mod into:
@@ -41,8 +62,10 @@ For a given mod ID, text file of mod IDs, or Steam Workshop collection, query St
    scheme — the mod-ID scheme is unaffected since IDs are already safe.
 
 6. **Update the manifest**
-   After all actions complete, create or update the manifest in the
-   target directory with the current state of every managed mod.
+   Create or update the manifest in the target directory with the current
+   state of every managed mod. The manifest is written even when some mods
+   failed, so work already done survives a failed run, and it is written
+   atomically so an interrupted run cannot truncate it.
 
 ## Manifest format
 

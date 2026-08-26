@@ -11,9 +11,11 @@ It uses SteamCMD as the source of truth, compares Workshop metadata with a local
 - Download and update Workshop mods by ID.
 - Compare remote metadata with a local minified JSON manifest.
 - Remove mods no longer requested, with independent deletion checks.
-- Rename folders by mod ID or sanitized Workshop name.
+- Rename folders by mod ID or sanitized Workshop name, with an optional prefix (`@` for Arma).
 - Sanitize names for restrictive game servers such as Arma.
 - Download larger mods first when several transfers are queued.
+- Retry only the items SteamCMD failed to deliver, and record what did succeed.
+- Preview a run with `--dry-run` before anything is downloaded or deleted.
 - Support anonymous and authenticated SteamCMD access.
 
 ## Requirements
@@ -61,7 +63,13 @@ Use a text file with one Workshop ID per line:
 # Server mods
 123456789
 987654321 # inline comments are allowed
+450814997 CBA_A3            # an optional name after the ID
+463939057 Advanced Combat Environment
 ```
+
+A name written after the ID is used for the folder name in `--name-mode name`,
+taking precedence over the Workshop title. This lets a preset control its own
+naming and keeps `--mod-list` usable when the Steam Web API is unreachable.
 
 ```sh
 swmctl sync --app-id 107410 --mod-list mods.txt
@@ -76,7 +84,47 @@ swmctl sync --app-id 107410 --collection "https://steamcommunity.com/sharedfiles
 
 Positional IDs, `--mod-list`, and `--collection` can be combined. Duplicate IDs are downloaded once.
 
-Useful options include `--output`, `--manifest`, `--steamcmd`, `--steamcmd-dir`, `--name-mode`, `--delete-unrequested`, and `--delete-unavailable`.
+### Arma servers
+
+Arma expects mod folders to begin with `@`:
+
+```sh
+swmctl sync --app-id 107410 --mod-list mods.txt --name-mode name --name-prefix @
+```
+
+That produces `@cba_a3`, `@advanced_combat_environment`, and so on.
+
+### Retries
+
+SteamCMD regularly drops individual Workshop items while still exiting
+successfully. `swmctl` checks what actually arrived on disk and retries only the
+items still missing:
+
+```sh
+swmctl sync --app-id 107410 --mod-list mods.txt --max-retries 5 --retry-delay 30
+```
+
+Mods placed during a failed run are written to the manifest before the error is
+reported, so re-running skips them.
+
+### Deletion
+
+Deletion is off by default and split into two independent checks:
+
+- `--delete-unrequested` removes managed mods absent from the requested list.
+- `--delete-unavailable` removes managed mods that Steam reports as **deleted**.
+  Items that are merely invisible to an unauthenticated metadata request, such
+  as private or login-gated mods, are never removed by this flag.
+
+Without `--delete-unrequested`, managed mods missing from the request are
+reported as warnings and left alone. Use `--dry-run` to see the planned actions
+first.
+
+### Other options
+
+Useful options include `--output`, `--manifest`, `--steamcmd`, `--steamcmd-dir`,
+`--name-mode`, `--name-prefix`, `--max-retries`, `--retry-delay`, `--dry-run`,
+and `--quiet`.
 
 ## Installation
 
@@ -104,6 +152,32 @@ irm https://raw.githubusercontent.com/Saniee/swmctl/refs/heads/master/scripts/in
 
 Set `SWMCTL_REPOSITORY` when installing from a fork.
 
-Both installers support an optional version override. Uninstall removes only the binary; configuration, manifests, and downloaded mods are preserved.
+Both installers accept an optional version override. Because the one-line forms
+above pipe the script into a shell, the version is passed through that shell:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Saniee/swmctl/refs/heads/master/scripts/install.sh | sh -s -- v0.1.0
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Saniee/swmctl/refs/heads/master/scripts/install.ps1))) -Version v0.1.0
+```
+
+Uninstall removes only the binary; configuration, manifests, and downloaded mods are preserved.
 
 ## Development
+
+Requires a Rust toolchain supporting edition 2024 (1.85 or newer).
+
+```sh
+cargo build
+cargo test
+```
+
+Before opening a pull request, run the same checks CI does:
+
+```sh
+cargo fmt --check
+cargo test --locked
+cargo clippy --all-targets --all-features --locked -- -D warnings
+```

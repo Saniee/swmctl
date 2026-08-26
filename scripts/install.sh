@@ -16,7 +16,15 @@ if [ -z "$tag" ]; then
     exit 1
 fi
 
-asset="swmctl-x86_64-unknown-linux-gnu"
+arch="$(uname -m)"
+case "$arch" in
+    x86_64|amd64) asset="swmctl-x86_64-unknown-linux-gnu" ;;
+    *)
+        printf 'No swmctl release binary is published for %s.\n' "$arch" >&2
+        printf 'Build from source instead: cargo install --git https://github.com/%s\n' "$repository" >&2
+        exit 1
+        ;;
+esac
 base_url="https://github.com/$repository/releases/download/$tag"
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT INT TERM
