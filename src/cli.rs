@@ -151,6 +151,43 @@ impl Reporter {
     }
 }
 
+/// Warnings for requested items Steam will not serve: ones it reports as
+/// unavailable, and ones published for a different app. Both surface at
+/// download time as an indistinguishable SteamCMD failure, so they are worth
+/// naming before the download is attempted.
+fn availability_warnings(
+    app_id: u32,
+    mod_ids: &[String],
+    published_files: &HashMap<String, crate::steam_api::PublishedFile>,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for mod_id in mod_ids {
+        let Some(file) = published_files.get(mod_id) else {
+            continue;
+        };
+        let label = if file.title.is_empty() {
+            mod_id.clone()
+        } else {
+            format!("{mod_id} ({})", file.title)
+        };
+        if let Some(reason) = file.unavailable_reason() {
+            warnings.push(format!(
+                "{label}: Steam reports this item as {reason} — SteamCMD will not be able to download it"
+            ));
+            // An unavailable item has no meaningful app to compare against.
+            continue;
+        }
+        if let Some(item_app) = file.app_id
+            && item_app != app_id
+        {
+            warnings.push(format!(
+                "{label}: published for app {item_app}, not --app-id {app_id} — SteamCMD will not be able to download it"
+            ));
+        }
+    }
+    warnings
+}
+
 /// Reason recorded when SteamCMD exits without leaving any content behind.
 const NO_DOWNLOAD: &str = "SteamCMD did not produce a download";
 
@@ -225,6 +262,12 @@ fn run_sync(mut args: SyncArgs) -> Result<(), Error> {
             None
         }
     };
+
+    if let Some(files) = published_files.as_ref() {
+        for warning in availability_warnings(args.app_id, &mod_ids, files) {
+            report.warn(&warning);
+        }
+    }
 
     let remote = build_remote_metadata(&requested, &metadata, published_files.as_ref());
     // Availability is only knowable when Steam answered.
@@ -673,6 +716,8 @@ mod tests {
                 file_size: Some(10),
                 time_updated: Some(5),
                 deleted: false,
+                result: 1,
+                app_id: Some(107410),
             },
         )]);
 
@@ -694,6 +739,8 @@ mod tests {
                 file_size: None,
                 time_updated: None,
                 deleted: false,
+                result: 1,
+                app_id: Some(107410),
             },
         )]);
 
@@ -737,6 +784,53 @@ mod tests {
         let rendered = format!("{args:?}");
         assert!(!rendered.contains("hunter2"));
         assert!(rendered.contains("<redacted>"));
+    }
+
+    fn published(title: &str, result: i32, app_id: Option<u32>) -> crate::steam_api::PublishedFile {
+        crate::steam_api::PublishedFile {
+            title: title.into(),
+            file_size: Some(10),
+            time_updated: Some(5),
+            deleted: result == 9,
+            result,
+            app_id,
+        }
+    }
+
+    #[test]
+    fn warns_about_items_steam_will_not_serve() {
+        let files = HashMap::from([
+            ("1".to_string(), published("Fine", 1, Some(107410))),
+            ("2".to_string(), published("Hidden", 8, Some(107410))),
+            ("3".to_string(), published("Gone", 9, Some(107410))),
+            ("4".to_string(), published("Wrong App", 1, Some(221100))),
+        ]);
+        let mod_ids = vec!["1".into(), "2".into(), "3".into(), "4".into()];
+
+        let warnings = availability_warnings(107410, &mod_ids, &files);
+
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert!(warnings[0].contains("2 (Hidden)") && warnings[0].contains("hidden"));
+        assert!(warnings[1].contains("3 (Gone)") && warnings[1].contains("deleted"));
+        assert!(warnings[2].contains("4 (Wrong App)") && warnings[2].contains("221100"));
+    }
+
+    #[test]
+    fn healthy_items_and_unknown_ids_produce_no_warnings() {
+        let files = HashMap::from([("1".to_string(), published("Fine", 1, Some(107410)))]);
+        // An id Steam did not answer for is left to the download to resolve,
+        // and a missing app_id is not evidence of a mismatch.
+        let mod_ids = vec!["1".into(), "999".into()];
+
+        assert!(availability_warnings(107410, &mod_ids, &files).is_empty());
+        assert!(
+            availability_warnings(
+                107410,
+                &["2".to_string()],
+                &HashMap::from([("2".to_string(), published("No App", 1, None))]),
+            )
+            .is_empty()
+        );
     }
 
     #[test]

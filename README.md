@@ -50,6 +50,8 @@ swmctl sync --app-id 107410 --mod-list preset.txt --username <steam-user> --pass
 
 The same credentials can come from `SWMCTL_STEAM_USERNAME` / `SWMCTL_STEAM_PASSWORD` or the config file. Accounts with Steam Guard prompt for a code on the first login in a terminal; SteamCMD caches the session afterwards, so unattended runs work once that first login has been completed interactively on the same machine and user.
 
+`swmctl` also checks each requested item against the Workshop API before downloading, and warns when Steam reports an item as hidden, deleted, access-denied, or banned, or when the item is published for a different app than `--app-id`. Each of those reaches SteamCMD as an ordinary download failure, so naming the cause up front saves a retry cycle.
+
 ## Workflow
 
 For each requested Workshop mod, `swmctl`:
@@ -175,11 +177,11 @@ Both installers accept an optional version override. Because the one-line forms
 above pipe the script into a shell, the version is passed through that shell:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Saniee/swmctl/refs/heads/master/scripts/install.sh | sh -s -- v0.2.1
+curl -fsSL https://raw.githubusercontent.com/Saniee/swmctl/refs/heads/master/scripts/install.sh | sh -s -- v0.3.0
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Saniee/swmctl/refs/heads/master/scripts/install.ps1))) -Version v0.2.1
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Saniee/swmctl/refs/heads/master/scripts/install.ps1))) -Version v0.3.0
 ```
 
 Uninstall removes only the binary; configuration, manifests, and downloaded mods are preserved.
