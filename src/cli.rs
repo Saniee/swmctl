@@ -395,6 +395,16 @@ fn run_sync(mut args: SyncArgs) -> Result<(), Error> {
 
         let mut timed_out: Vec<String> = Vec::new();
         for batch in pending.chunks(batch_size) {
+            // SteamCMD prints one line when an item starts and nothing at all
+            // until it finishes, so a large mod leaves the terminal silent for
+            // minutes. Name what is being fetched, and how big it is, before
+            // handing over.
+            for mod_id in batch {
+                report.log(&format!(
+                    "Downloading : {}",
+                    download_label(remote.iter().find(|item| item.mod_id == *mod_id), mod_id)
+                ));
+            }
             // A missing or unusable executable will not fix itself; an
             // unsuccessful exit is reported per item below.
             let download = steamcmd.workshop_download(args.app_id, batch, &args.steamcmd_dir)?;
@@ -484,6 +494,39 @@ fn run_sync(mut args: SyncArgs) -> Result<(), Error> {
         failures.len()
     )
     .into())
+}
+
+/// `450814997 (CBA_A3, 1.2 GiB)`, dropping whatever Steam did not tell us.
+fn download_label(item: Option<&RemoteMod>, mod_id: &str) -> String {
+    let mut details = Vec::new();
+    if let Some(item) = item {
+        if item.name != mod_id {
+            details.push(item.name.clone());
+        }
+        if item.file_size > 0 {
+            details.push(human_size(item.file_size));
+        }
+    }
+    if details.is_empty() {
+        mod_id.to_string()
+    } else {
+        format!("{mod_id} ({})", details.join(", "))
+    }
+}
+
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
 }
 
 fn place_requested(
@@ -904,6 +947,39 @@ mod tests {
         let hint = anonymous_failure_hint(107410, &failures, true).expect("hint should be offered");
         assert!(hint.contains("107410"));
         assert!(hint.contains("--username"));
+    }
+
+    #[test]
+    fn labels_a_download_with_whatever_steam_told_us() {
+        let item = RemoteMod {
+            name: "CBA_A3".into(),
+            mod_id: "450814997".into(),
+            file_size: 1_288_490_188,
+            last_updated: None,
+            deleted: false,
+        };
+        assert_eq!(
+            download_label(Some(&item), "450814997"),
+            "450814997 (CBA_A3, 1.2 GiB)"
+        );
+
+        // A name that is just the ID again, and an unknown size, add nothing.
+        let bare = RemoteMod {
+            name: "450814997".into(),
+            mod_id: "450814997".into(),
+            file_size: 0,
+            last_updated: None,
+            deleted: false,
+        };
+        assert_eq!(download_label(Some(&bare), "450814997"), "450814997");
+        assert_eq!(download_label(None, "450814997"), "450814997");
+    }
+
+    #[test]
+    fn scales_sizes_to_the_nearest_unit() {
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(2048), "2.0 KiB");
+        assert_eq!(human_size(5_242_880), "5.0 MiB");
     }
 
     #[test]

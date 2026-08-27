@@ -47,8 +47,21 @@ is piped and echoed back through so progress still reaches the terminal.
   the item ID is parsed as the digits following the marker, never as the rest
   of the line.
 - **Progress is redrawn with carriage returns.** Output is split on `\r` as
-  well as `\n` (`read_chunk`); splitting on newlines alone holds a whole
+  well as `\n` for parsing; splitting on newlines alone holds a whole
   download in the buffer and the progress line appears to freeze.
+- **Echo bytes before splitting them into lines.** SteamCMD announces an item
+  as `Downloading item <id> ...` with no trailing newline, then prints nothing
+  at all until that item finishes, and it prompts for a Steam Guard code the
+  same way. Holding those bytes back until a line ends makes the run look
+  hung: output stops at `Waiting for user info...OK` and everything arrives in
+  one burst minutes later. `stream_output` writes and flushes each chunk as it
+  arrives and buffers a separate copy for parsing. Under `--quiet` the
+  passthrough goes to a sink, so an interactive prompt is invisible by
+  construction — `--quiet` belongs in non-interactive runs only.
+- **SteamCMD reports no progress for Workshop items.** There is no percentage
+  or byte count between the start of an item and its `Success.` line, so a
+  large mod is genuinely silent for minutes. swmctl logs the item's name and
+  size before handing over so the wait is at least attributable.
 - Messages currently recognised: `Success. Downloaded item <id> to ...`,
   `ERROR! Timeout downloading item <id>`, and
   `ERROR! Download item <id> failed (<reason>)`.
