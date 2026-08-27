@@ -120,7 +120,9 @@ Use `--dry-run` to preview planned actions before running for real.
 
 ### Other options
 
-Useful options include `--output`, `--manifest`, `--steamcmd`, `--steamcmd-dir`, `--name-mode`, `--name-prefix`, `--max-retries`, `--retry-delay`, `--dry-run`, and `--quiet`.
+Useful options include `--output`, `--manifest`, `--steamcmd`, `--steamcmd-dir`, `--name-mode`, `--name-prefix`, `--max-retries`, `--retry-delay`, `--batch-size`, `--dry-run`, and `--quiet`.
+
+`--batch-size` sets how many Workshop items are handed to a single SteamCMD invocation. It defaults to `1`; raise it to pay fewer SteamCMD startups on large presets.
 
 ## Authentication
 

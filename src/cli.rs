@@ -16,7 +16,7 @@ use crate::naming::{NameMode, directory_name};
 use crate::paths::absolute;
 use crate::placement::{directory_size, place_mod};
 use crate::steam_api::{fetch_collection_items, fetch_published_files};
-use crate::steamcmd::{SteamCmd, SteamCmdError, workshop_content_path, workshop_download_path};
+use crate::steamcmd::{SteamCmd, workshop_content_path, workshop_download_path};
 
 #[derive(Debug, Parser)]
 #[command(name = "swmctl", version, about = "Synchronize Steam Workshop mods")]
@@ -70,6 +70,12 @@ pub struct SyncArgs {
     /// Seconds to wait between attempts.
     #[arg(long, default_value_t = 30, value_name = "SECONDS")]
     pub retry_delay: u64,
+    /// Workshop items handed to a single SteamCMD invocation. A SteamCMD
+    /// timeout ends the whole process and discards every item still in flight,
+    /// so items are downloaded one at a time by default. Raise it to trade
+    /// timeout isolation for fewer SteamCMD startups.
+    #[arg(long, default_value_t = 1, value_name = "N")]
+    pub batch_size: usize,
     /// Report the planned actions without downloading, moving, or deleting.
     #[arg(long)]
     pub dry_run: bool,
@@ -107,6 +113,7 @@ impl fmt::Debug for SyncArgs {
             .field("name_prefix", &self.name_prefix)
             .field("max_retries", &self.max_retries)
             .field("retry_delay", &self.retry_delay)
+            .field("batch_size", &self.batch_size)
             .field("dry_run", &self.dry_run)
             .field("quiet", &self.quiet)
             .field("delete_unrequested", &self.delete_unrequested)
@@ -191,6 +198,9 @@ fn availability_warnings(
 /// Reason recorded when SteamCMD exits without leaving any content behind.
 const NO_DOWNLOAD: &str = "SteamCMD did not produce a download";
 
+/// Reason recorded when SteamCMD gave up on an item part-way through.
+const TIMED_OUT: &str = "SteamCMD timed out downloading this item; the partial download is kept and the next attempt resumes where it stopped";
+
 /// SteamCMD reports `Download item <id> failed (No Connection)` for every item
 /// when it is logged in anonymously but the app's Workshop requires an account
 /// that owns the app (Arma 3 and most paid titles). The failures look like
@@ -215,6 +225,27 @@ Workshop items for paid apps (Arma 3, app 107410, among them) can only be downlo
 anonymous attempts fail with \"(No Connection)\". \
 Supply credentials with --username/--password, the SWMCTL_STEAM_USERNAME and SWMCTL_STEAM_PASSWORD environment variables, or a [steamcmd] section in {config}."
     ))
+}
+
+/// SteamCMD enforces its own download timeout and offers no way to raise it.
+/// What is left is to keep resuming: the partial download survives, so each
+/// further attempt starts from where the last one stopped.
+fn timeout_hint(failures: &[(String, String)], batch_size: usize) -> Option<String> {
+    let count = failures
+        .iter()
+        .filter(|(_, reason)| reason == TIMED_OUT)
+        .count();
+    if count == 0 {
+        return None;
+    }
+    let mut hint = format!(
+        "{count} item(s) timed out. SteamCMD gives up on an item that takes too long, but keeps what it downloaded: \
+re-running resumes it, and large items often need several passes. Raise --max-retries to make one run keep trying."
+    );
+    if batch_size > 1 {
+        hint.push_str(" Pass --batch-size 1 so a timeout no longer discards the items downloading alongside it.");
+    }
+    Some(hint)
 }
 
 fn run_sync(mut args: SyncArgs) -> Result<(), Error> {
@@ -344,10 +375,14 @@ fn run_sync(mut args: SyncArgs) -> Result<(), Error> {
             "authenticated"
         }
     ));
-    let steamcmd = SteamCmd::new(args.steamcmd.clone(), credentials);
+    let steamcmd = SteamCmd::new(args.steamcmd.clone(), credentials).quiet(args.quiet);
 
     let mut failures: Vec<(String, String)> = Vec::new();
     let attempts = args.max_retries.max(1);
+    let batch_size = args.batch_size.max(1);
+    report.log(&format!(
+        "Batch size  : {batch_size} item(s) per SteamCMD run"
+    ));
 
     for attempt in 1..=attempts {
         if pending.is_empty() {
@@ -358,11 +393,26 @@ fn run_sync(mut args: SyncArgs) -> Result<(), Error> {
             pending.len()
         ));
 
-        if let Err(error) = steamcmd.workshop_download(args.app_id, &pending, &args.steamcmd_dir) {
-            match error {
-                // A missing or unusable executable will not fix itself.
-                SteamCmdError::Start { .. } => return Err(error.into()),
-                SteamCmdError::Failed { .. } => report.warn(&format!("{error}")),
+        let mut timed_out: Vec<String> = Vec::new();
+        for batch in pending.chunks(batch_size) {
+            // A missing or unusable executable will not fix itself; an
+            // unsuccessful exit is reported per item below.
+            let download = steamcmd.workshop_download(args.app_id, batch, &args.steamcmd_dir)?;
+
+            let batch_timeouts = download.timed_out().map(str::to_string).collect::<Vec<_>>();
+            for mod_id in &batch_timeouts {
+                report.warn(&format!("{mod_id}: {TIMED_OUT}"));
+            }
+            if !batch_timeouts.is_empty() && batch.len() > 1 {
+                report.warn(&format!(
+                    "the timeout discarded whatever else was in flight; the other {} item(s) in this batch are retried",
+                    batch.len() - batch_timeouts.len()
+                ));
+            }
+            timed_out.extend(batch_timeouts);
+
+            if let Some(error) = download.failure() {
+                report.warn(&format!("{error}"));
             }
         }
 
@@ -376,7 +426,14 @@ fn run_sync(mut args: SyncArgs) -> Result<(), Error> {
                     entries.push(entry);
                 }
                 Err(error) => {
-                    failures.push((mod_id.clone(), error.to_string()));
+                    // A timeout explains the missing content better than the
+                    // empty staging directory it leaves behind.
+                    let reason = if timed_out.contains(mod_id) {
+                        TIMED_OUT.to_string()
+                    } else {
+                        error.to_string()
+                    };
+                    failures.push((mod_id.clone(), reason));
                     still_pending.push(mod_id.clone());
                 }
             }
@@ -417,6 +474,9 @@ fn run_sync(mut args: SyncArgs) -> Result<(), Error> {
         report.warn(&format!("  {mod_id}: {reason}"));
     }
     if let Some(hint) = anonymous_failure_hint(args.app_id, &failures, anonymous) {
+        report.warn(&hint);
+    }
+    if let Some(hint) = timeout_hint(&failures, batch_size) {
         report.warn(&hint);
     }
     Err(format!(
@@ -773,6 +833,7 @@ mod tests {
             name_prefix: String::new(),
             max_retries: 3,
             retry_delay: 30,
+            batch_size: 1,
             dry_run: false,
             quiet: false,
             delete_unrequested: false,
@@ -843,6 +904,41 @@ mod tests {
         let hint = anonymous_failure_hint(107410, &failures, true).expect("hint should be offered");
         assert!(hint.contains("107410"));
         assert!(hint.contains("--username"));
+    }
+
+    #[test]
+    fn hints_at_resuming_when_items_time_out() {
+        let failures = vec![
+            ("541888371".to_string(), TIMED_OUT.to_string()),
+            ("463939057".to_string(), NO_DOWNLOAD.to_string()),
+        ];
+
+        let hint = timeout_hint(&failures, 1).expect("hint should be offered");
+        assert!(hint.starts_with("1 item(s) timed out"));
+        assert!(!hint.contains("--batch-size"));
+
+        let batched = timeout_hint(&failures, 8).expect("hint should be offered");
+        assert!(batched.contains("--batch-size 1"));
+    }
+
+    #[test]
+    fn does_not_hint_about_timeouts_when_none_timed_out() {
+        assert!(timeout_hint(&[], 1).is_none());
+        assert!(
+            timeout_hint(&[("1".to_string(), NO_DOWNLOAD.to_string())], 4).is_none(),
+            "an ordinary failure is not a timeout"
+        );
+    }
+
+    /// A timeout is not a "(No Connection)" failure, so the credentials hint
+    /// stays out of the way when the run was merely too slow.
+    #[test]
+    fn a_timeout_suppresses_the_anonymous_credentials_hint() {
+        let failures = vec![
+            ("541888371".to_string(), TIMED_OUT.to_string()),
+            ("463939057".to_string(), NO_DOWNLOAD.to_string()),
+        ];
+        assert!(anonymous_failure_hint(107410, &failures, true).is_none());
     }
 
     #[test]
