@@ -12,6 +12,13 @@ pub struct Credentials {
     pub password: Option<String>,
 }
 
+impl Credentials {
+    /// SteamCMD logs in anonymously unless both a username and password are set.
+    pub fn is_anonymous(&self) -> bool {
+        self.username.is_none() || self.password.is_none()
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CredentialOverrides {
     pub username: Option<String>,
@@ -133,6 +140,18 @@ mod tests {
         let credentials = resolve_credentials(&overrides, &config).expect("credentials are valid");
         assert_eq!(credentials.username.as_deref(), Some("flag-user"));
         assert_eq!(credentials.password.as_deref(), Some("flag-pass"));
+    }
+
+    #[test]
+    fn missing_credentials_are_anonymous() {
+        assert!(Credentials::default().is_anonymous());
+        assert!(
+            !Credentials {
+                username: Some("alice".into()),
+                password: Some("secret".into()),
+            }
+            .is_anonymous()
+        );
     }
 
     #[test]

@@ -151,6 +151,35 @@ impl Reporter {
     }
 }
 
+/// Reason recorded when SteamCMD exits without leaving any content behind.
+const NO_DOWNLOAD: &str = "SteamCMD did not produce a download";
+
+/// SteamCMD reports `Download item <id> failed (No Connection)` for every item
+/// when it is logged in anonymously but the app's Workshop requires an account
+/// that owns the app (Arma 3 and most paid titles). The failures look like
+/// network trouble, so spell out the likely cause instead.
+fn anonymous_failure_hint(
+    app_id: u32,
+    failures: &[(String, String)],
+    anonymous: bool,
+) -> Option<String> {
+    if !anonymous || failures.is_empty() {
+        return None;
+    }
+    if !failures.iter().all(|(_, reason)| reason == NO_DOWNLOAD) {
+        return None;
+    }
+    let config = config_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "the swmctl config file".into());
+    Some(format!(
+        "SteamCMD ran anonymously and downloaded nothing for app {app_id}. \
+Workshop items for paid apps (Arma 3, app 107410, among them) can only be downloaded by a Steam account that owns the app; \
+anonymous attempts fail with \"(No Connection)\". \
+Supply credentials with --username/--password, the SWMCTL_STEAM_USERNAME and SWMCTL_STEAM_PASSWORD environment variables, or a [steamcmd] section in {config}."
+    ))
+}
+
 fn run_sync(mut args: SyncArgs) -> Result<(), Error> {
     let report = Reporter { quiet: args.quiet };
 
@@ -263,6 +292,15 @@ fn run_sync(mut args: SyncArgs) -> Result<(), Error> {
             &config,
         )?
     };
+    let anonymous = credentials.is_anonymous();
+    report.log(&format!(
+        "Steam login : {}",
+        if anonymous {
+            "anonymous"
+        } else {
+            "authenticated"
+        }
+    ));
     let steamcmd = SteamCmd::new(args.steamcmd.clone(), credentials);
 
     let mut failures: Vec<(String, String)> = Vec::new();
@@ -335,6 +373,9 @@ fn run_sync(mut args: SyncArgs) -> Result<(), Error> {
     for (mod_id, reason) in &failures {
         report.warn(&format!("  {mod_id}: {reason}"));
     }
+    if let Some(hint) = anonymous_failure_hint(args.app_id, &failures, anonymous) {
+        report.warn(&hint);
+    }
     Err(format!(
         "{} mod(s) failed after {attempts} attempt(s); re-run to retry — completed mods are skipped",
         failures.len()
@@ -354,7 +395,7 @@ fn place_requested(
         if partial.exists() {
             return Err(format!("still downloading in {}", partial.display()).into());
         }
-        return Err("SteamCMD did not produce a download".into());
+        return Err(NO_DOWNLOAD.into());
     }
 
     let item = remote.iter().find(|item| item.mod_id == mod_id);
@@ -696,5 +737,34 @@ mod tests {
         let rendered = format!("{args:?}");
         assert!(!rendered.contains("hunter2"));
         assert!(rendered.contains("<redacted>"));
+    }
+
+    #[test]
+    fn hints_at_credentials_when_anonymous_downloads_produce_nothing() {
+        let failures = vec![
+            ("583496184".to_string(), NO_DOWNLOAD.to_string()),
+            ("463939057".to_string(), NO_DOWNLOAD.to_string()),
+        ];
+
+        let hint = anonymous_failure_hint(107410, &failures, true).expect("hint should be offered");
+        assert!(hint.contains("107410"));
+        assert!(hint.contains("--username"));
+    }
+
+    #[test]
+    fn does_not_hint_when_authenticated_or_partially_downloaded() {
+        let failures = vec![("583496184".to_string(), NO_DOWNLOAD.to_string())];
+        assert!(anonymous_failure_hint(107410, &failures, false).is_none());
+
+        let mixed = vec![
+            ("583496184".to_string(), NO_DOWNLOAD.to_string()),
+            (
+                "463939057".to_string(),
+                "still downloading in /tmp".to_string(),
+            ),
+        ];
+        assert!(anonymous_failure_hint(107410, &mixed, true).is_none());
+
+        assert!(anonymous_failure_hint(107410, &[], true).is_none());
     }
 }
