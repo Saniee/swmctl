@@ -36,6 +36,20 @@ Credentials may be supplied through:
 
 When no credentials are configured, `swmctl` uses anonymous SteamCMD access. Steam Guard codes and other SteamCMD prompts remain interactive in the terminal. Failed SteamCMD commands cause `swmctl` to exit with an error.
 
+Anonymous access only works for apps whose Workshop content Valve serves anonymously. Paid titles — Arma 3 (app `107410`) among them — require an account that **owns the app**. Without one, SteamCMD reports:
+
+```text
+ERROR! Download item 583496184 failed (No Connection).
+```
+
+despite the network being fine, and `swmctl` then reports `SteamCMD did not produce a download` for every item. Log in with an owning account to fix it:
+
+```sh
+swmctl sync --app-id 107410 --mod-list preset.txt --username <steam-user> --password <steam-password>
+```
+
+The same credentials can come from `SWMCTL_STEAM_USERNAME` / `SWMCTL_STEAM_PASSWORD` or the config file. Accounts with Steam Guard prompt for a code on the first login in a terminal; SteamCMD caches the session afterwards, so unattended runs work once that first login has been completed interactively on the same machine and user.
+
 ## Workflow
 
 For each requested Workshop mod, `swmctl`:
