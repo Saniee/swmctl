@@ -9,7 +9,7 @@ pub mod steam_api;
 pub mod steamcmd;
 
 pub use auth::{CredentialOverrides, Credentials, load_config, resolve_credentials};
-pub use steamcmd::{SteamCmd, SteamCmdError};
+pub use steamcmd::{DownloadReport, ItemOutcome, SteamCmd, SteamCmdError};
 
 #[cfg(test)]
 mod tests {
