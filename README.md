@@ -109,38 +109,6 @@ That produces `@cba_a3`, `@advanced_combat_environment`, and so on.
 swmctl sync --app-id 107410 --mod-list mods.txt --max-retries 5 --retry-delay 30
 ```
 
-### SteamCMD timeouts
-
-SteamCMD enforces its own download timeout and gives up on items that take too
-long, which large mods regularly do:
-
-```
-ERROR! Timeout downloading item 541888371
-CWorkThreadPool::~CWorkThreadPool: work complete queue not empty, 179 items discarded.
-```
-
-The timeout ends the whole SteamCMD process, discarding every item still in
-flight along with the one that stalled. `swmctl` therefore downloads one item
-per SteamCMD invocation by default, so a slow mod no longer costs its
-neighbours their progress:
-
-```
-swmctl sync --app-id 107410 --mod-list mods.txt --batch-size 1
-```
-
-Raise `--batch-size` to hand several items to each invocation and pay fewer
-SteamCMD startups, at the cost of that isolation.
-
-A timed-out item is named in the output and reported as a timeout rather than
-as a missing download. SteamCMD keeps the bytes it already fetched in
-`steamapps/workshop/downloads`, so each further attempt resumes where the last
-one stopped — a very large mod may simply need several passes. Raise
-`--max-retries` to make a single run keep trying:
-
-```
-swmctl sync --app-id 107410 --mod-list mods.txt --max-retries 10 --retry-delay 15
-```
-
 ### Deletion
 
 Deletion is off by default and split into two independent checks:
@@ -153,6 +121,8 @@ Use `--dry-run` to preview planned actions before running for real.
 ### Other options
 
 Useful options include `--output`, `--manifest`, `--steamcmd`, `--steamcmd-dir`, `--name-mode`, `--name-prefix`, `--max-retries`, `--retry-delay`, `--batch-size`, `--dry-run`, and `--quiet`.
+
+`--batch-size` sets how many Workshop items are handed to a single SteamCMD invocation. It defaults to `1`; raise it to pay fewer SteamCMD startups on large presets.
 
 ## Authentication
 
