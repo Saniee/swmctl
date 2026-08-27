@@ -144,23 +144,14 @@ impl SteamCmd {
 
         let mut outcomes = Vec::new();
         if let Some(stdout) = child.stdout.take() {
-            let mut reader = BufReader::new(stdout);
-            let mut chunk = Vec::new();
+            let mut echo: Box<dyn Write> = if self.quiet {
+                Box::new(std::io::sink())
+            } else {
+                Box::new(std::io::stdout())
+            };
             // A read error only costs progress output and parsed outcomes; the
             // exit status below still describes the run.
-            while let Ok(read) = read_chunk(&mut reader, &mut chunk)
-                && read > 0
-            {
-                let text = String::from_utf8_lossy(&chunk);
-                if !self.quiet {
-                    let mut stdout = std::io::stdout();
-                    let _ = stdout.write_all(text.as_bytes());
-                    let _ = stdout.flush();
-                }
-                if let Some(outcome) = parse_item_outcome(&text) {
-                    outcomes.push(outcome);
-                }
-            }
+            let _ = stream_output(&mut BufReader::new(stdout), echo.as_mut(), &mut outcomes);
         }
 
         let status = child.wait().map_err(|source| SteamCmdError::Start {
@@ -171,35 +162,63 @@ impl SteamCmd {
     }
 }
 
-/// Read up to and including the next `\n` or `\r`. SteamCMD redraws its
-/// progress line with carriage returns, so splitting on newlines alone would
-/// hold the whole download back in the buffer.
-fn read_chunk<R: BufRead>(reader: &mut R, buffer: &mut Vec<u8>) -> std::io::Result<usize> {
-    buffer.clear();
+/// Pass SteamCMD's output through to `echo` and collect the item results out
+/// of it.
+///
+/// Bytes are echoed as soon as they arrive, before any attempt to split them
+/// into lines. SteamCMD prompts for a Steam Guard code without a trailing
+/// newline and then blocks on stdin; holding those bytes back until a line
+/// ends would leave the user staring at a terminal that has gone quiet while
+/// SteamCMD waits for an answer it never appeared to ask for.
+///
+/// Parsing keeps its own buffer, split on `\r` as well as `\n` because
+/// SteamCMD redraws its progress line with carriage returns.
+fn stream_output(
+    reader: &mut impl BufRead,
+    echo: &mut dyn Write,
+    outcomes: &mut Vec<(String, ItemOutcome)>,
+) -> std::io::Result<()> {
+    /// Cap on a single unterminated line, so output that never delimits
+    /// itself cannot grow the buffer without bound.
+    const MAX_LINE: usize = 64 * 1024;
+
+    let mut line: Vec<u8> = Vec::new();
     loop {
-        let available = match reader.fill_buf() {
-            Ok(available) => available,
+        let chunk = match reader.fill_buf() {
+            Ok(chunk) => chunk.to_vec(),
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
         };
-        if available.is_empty() {
-            return Ok(buffer.len());
+        if chunk.is_empty() {
+            break;
         }
-        match available
+        reader.consume(chunk.len());
+
+        echo.write_all(&chunk)?;
+        echo.flush()?;
+
+        line.extend_from_slice(&chunk);
+        while let Some(index) = line
             .iter()
             .position(|byte| *byte == b'\n' || *byte == b'\r')
         {
-            Some(index) => {
-                buffer.extend_from_slice(&available[..=index]);
-                reader.consume(index + 1);
-                return Ok(buffer.len());
-            }
-            None => {
-                let length = available.len();
-                buffer.extend_from_slice(available);
-                reader.consume(length);
-            }
+            let complete = line.drain(..=index).collect::<Vec<_>>();
+            collect(&complete, outcomes);
         }
+        if line.len() > MAX_LINE {
+            collect(&line, outcomes);
+            line.clear();
+        }
+    }
+
+    // SteamCMD's last message need not end in a delimiter.
+    collect(&line, outcomes);
+    Ok(())
+}
+
+fn collect(line: &[u8], outcomes: &mut Vec<(String, ItemOutcome)>) {
+    if let Some(outcome) = parse_item_outcome(&String::from_utf8_lossy(line)) {
+        outcomes.push(outcome);
     }
 }
 
@@ -237,6 +256,7 @@ fn leading_id(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
 
     #[test]
     fn stores_configured_executable() {
@@ -313,15 +333,79 @@ mod tests {
         assert!(parse_item_outcome("Success. Downloaded item to nowhere").is_none());
     }
 
-    #[test]
-    fn splits_output_on_carriage_returns() {
-        let mut reader = BufReader::new(&b"first\rsecond\nthird"[..]);
-        let mut buffer = Vec::new();
+    fn stream(input: &[u8]) -> (String, Vec<(String, ItemOutcome)>) {
+        let mut echo = Vec::new();
+        let mut outcomes = Vec::new();
+        stream_output(&mut BufReader::new(input), &mut echo, &mut outcomes).unwrap();
+        (String::from_utf8(echo).unwrap(), outcomes)
+    }
 
-        let mut chunks = Vec::new();
-        while read_chunk(&mut reader, &mut buffer).unwrap() > 0 {
-            chunks.push(String::from_utf8(buffer.clone()).unwrap());
+    #[test]
+    fn passes_output_through_and_splits_it_on_carriage_returns() {
+        let (echoed, outcomes) = stream(
+            b"Downloading item 1 ...\rSuccess. Downloaded item 1 to \"/srv\"\nERROR! Timeout downloading item 2",
+        );
+
+        assert_eq!(
+            echoed,
+            "Downloading item 1 ...\rSuccess. Downloaded item 1 to \"/srv\"\nERROR! Timeout downloading item 2"
+        );
+        // The trailing message has no delimiter and must still be read.
+        assert_eq!(
+            outcomes,
+            [
+                ("1".to_string(), ItemOutcome::Downloaded),
+                ("2".to_string(), ItemOutcome::TimedOut),
+            ]
+        );
+    }
+
+    /// SteamCMD prompts for a Steam Guard code with no trailing newline and
+    /// then blocks on stdin. Held back until a line ends, the prompt never
+    /// reaches the terminal and swmctl looks like it hung after logging in.
+    #[test]
+    fn echoes_an_unterminated_prompt_before_waiting_for_more_input() {
+        /// Yields the prompt, then refuses to answer a second read until the
+        /// prompt has been echoed — standing in for SteamCMD blocking on stdin.
+        struct PromptThenBlock<'a> {
+            echoed: &'a RefCell<Vec<u8>>,
+            sent: bool,
         }
-        assert_eq!(chunks, ["first\r", "second\n", "third"]);
+
+        impl std::io::Read for PromptThenBlock<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                const PROMPT: &[u8] =
+                    b"Logging in user 'alice' to Steam Public...\nSteam Guard code:";
+                if self.sent {
+                    assert!(
+                        String::from_utf8_lossy(&self.echoed.borrow())
+                            .ends_with("Steam Guard code:"),
+                        "the prompt must reach the terminal before SteamCMD blocks for an answer"
+                    );
+                    return Ok(0);
+                }
+                self.sent = true;
+                buffer[..PROMPT.len()].copy_from_slice(PROMPT);
+                Ok(PROMPT.len())
+            }
+        }
+
+        struct Tee<'a>(&'a RefCell<Vec<u8>>);
+        impl Write for Tee<'_> {
+            fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+                self.0.borrow_mut().extend_from_slice(buffer);
+                Ok(buffer.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let echoed = RefCell::new(Vec::new());
+        let mut reader = BufReader::new(PromptThenBlock {
+            echoed: &echoed,
+            sent: false,
+        });
+        stream_output(&mut reader, &mut Tee(&echoed), &mut Vec::new()).unwrap();
     }
 }

@@ -47,8 +47,16 @@ is piped and echoed back through so progress still reaches the terminal.
   the item ID is parsed as the digits following the marker, never as the rest
   of the line.
 - **Progress is redrawn with carriage returns.** Output is split on `\r` as
-  well as `\n` (`read_chunk`); splitting on newlines alone holds a whole
+  well as `\n` for parsing; splitting on newlines alone holds a whole
   download in the buffer and the progress line appears to freeze.
+- **Echo bytes before splitting them into lines.** SteamCMD prompts for a
+  Steam Guard code with no trailing newline and then blocks on stdin. Holding
+  those bytes back until a line ends hangs the run: the prompt never reaches
+  the terminal, and the user sees swmctl stop dead after the login line with
+  nothing to answer. `stream_output` writes and flushes each chunk as it
+  arrives and buffers a separate copy for parsing. Under `--quiet` the
+  passthrough goes to a sink, so an interactive prompt is invisible by
+  construction — `--quiet` belongs in non-interactive runs only.
 - Messages currently recognised: `Success. Downloaded item <id> to ...`,
   `ERROR! Timeout downloading item <id>`, and
   `ERROR! Download item <id> failed (<reason>)`.
