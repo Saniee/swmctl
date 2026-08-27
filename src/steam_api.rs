@@ -28,6 +28,30 @@ pub struct PublishedFile {
     /// `true` only when Steam explicitly reported the item as deleted.
     /// Items merely hidden from an unauthenticated request are not deleted.
     pub deleted: bool,
+    /// Raw `EResult` Steam returned for this item. Anything other than
+    /// `RESULT_OK` means SteamCMD will not be able to download it either.
+    pub result: i32,
+    /// App the item belongs to. An item published for another app cannot be
+    /// downloaded under `--app-id`, and SteamCMD reports that as a plain
+    /// download failure.
+    pub app_id: Option<u32>,
+}
+
+impl PublishedFile {
+    /// Human-readable reason an item is unusable, or `None` when Steam
+    /// reported it as available.
+    pub fn unavailable_reason(&self) -> Option<&'static str> {
+        match self.result {
+            RESULT_OK => None,
+            2 => Some("a generic failure"),
+            8 => Some("an invalid item, which usually means it is hidden or unlisted"),
+            RESULT_FILE_NOT_FOUND => Some("deleted or otherwise gone"),
+            15 => Some("access denied"),
+            16 => Some("a timeout"),
+            17 => Some("banned"),
+            _ => Some("unavailable"),
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -57,6 +81,8 @@ struct Details {
     title: Option<String>,
     file_size: Option<String>,
     time_updated: Option<i64>,
+    consumer_app_id: Option<u32>,
+    creator_app_id: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -133,6 +159,11 @@ fn parse_published_files(response: DetailsResponse) -> Option<HashMap<String, Pu
                         file_size: detail.file_size.and_then(|size| size.parse().ok()),
                         time_updated: detail.time_updated,
                         deleted: result == RESULT_FILE_NOT_FOUND,
+                        result,
+                        // Steam reports the consuming app; the creating app is
+                        // the same for ordinary Workshop items and is only a
+                        // fallback for entries that omit it.
+                        app_id: detail.consumer_app_id.or(detail.creator_app_id),
                     },
                 )
             })
@@ -206,6 +237,45 @@ mod tests {
         assert_eq!(files["123"].title, "Example");
         assert_eq!(files["123"].file_size, Some(456));
         assert!(!files["123"].deleted);
+        assert_eq!(files["123"].result, 1);
+        assert!(files["123"].unavailable_reason().is_none());
+    }
+
+    #[test]
+    fn reads_the_app_the_item_belongs_to() {
+        let response: DetailsResponse = serde_json::from_str(
+            r#"{"response":{"publishedfiledetails":[
+                {"publishedfileid":"123","result":1,"consumer_app_id":107410,"creator_app_id":107410},
+                {"publishedfileid":"456","result":1,"creator_app_id":221100},
+                {"publishedfileid":"789","result":1}
+            ]}}"#,
+        )
+        .expect("response should parse");
+        let files = parse_published_files(response).expect("details should be present");
+
+        assert_eq!(files["123"].app_id, Some(107410));
+        // Items that omit the consuming app fall back to the creating app.
+        assert_eq!(files["456"].app_id, Some(221100));
+        assert_eq!(files["789"].app_id, None);
+    }
+
+    #[test]
+    fn describes_why_an_item_is_unavailable() {
+        let response: DetailsResponse = serde_json::from_str(
+            r#"{"response":{"publishedfiledetails":[
+                {"publishedfileid":"hidden","result":8},
+                {"publishedfileid":"denied","result":15},
+                {"publishedfileid":"banned","result":17}
+            ]}}"#,
+        )
+        .expect("response should parse");
+        let files = parse_published_files(response).expect("details should be present");
+
+        assert!(files["hidden"].unavailable_reason().is_some());
+        assert!(files["denied"].unavailable_reason().is_some());
+        assert_eq!(files["banned"].unavailable_reason(), Some("banned"));
+        // Only a positive "file not found" may drive deletion.
+        assert!(!files["hidden"].deleted && !files["denied"].deleted && !files["banned"].deleted);
     }
 
     #[test]
