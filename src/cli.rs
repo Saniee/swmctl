@@ -384,6 +384,11 @@ fn run_sync(mut args: SyncArgs) -> Result<(), Error> {
         "Batch size  : {batch_size} item(s) per SteamCMD run"
     ));
 
+    // SteamCMD can answer an update request with an empty success when the
+    // ACF still records the item, so forget everything we are about to ask
+    // for. Each pending item is then fetched fresh, as if new.
+    forget_steamcmd_items(&args, &pending);
+
     for attempt in 1..=attempts {
         if pending.is_empty() {
             break;
@@ -428,8 +433,16 @@ fn run_sync(mut args: SyncArgs) -> Result<(), Error> {
 
         failures.clear();
         let mut still_pending = Vec::new();
+        // The ACF was rewritten by this attempt's downloads. Re-read it and
+        // rebuild the remote snapshot so recorded timestamps describe what
+        // was actually delivered: the pre-run ACF (and with it the manifest)
+        // can otherwise lag one version behind, re-planning the same update
+        // on every run while SteamCMD keeps answering with an empty success.
+        let fresh_metadata = read_acf(&metadata_path)?;
+        let fresh_remote =
+            build_remote_metadata(&requested, &fresh_metadata, published_files.as_ref());
         for mod_id in &pending {
-            match place_requested(&args, &remote, &metadata, mod_id) {
+            match place_requested(&args, &fresh_remote, &fresh_metadata, mod_id) {
                 Ok(entry) => {
                     report.log(&format!("Placed: {mod_id} => {}", entry.directory_name));
                     entries.retain(|existing| existing.mod_id != entry.mod_id);
@@ -629,6 +642,37 @@ fn cleanup_steamcmd_dir(args: &SyncArgs) {
     let _ = fs::remove_dir(&content);
     let _ = fs::remove_dir(args.steamcmd_dir.join("steamapps/workshop/content"));
     let _ = fs::remove_dir(args.steamcmd_dir.join("steamapps/workshop/downloads"));
+}
+
+/// Make SteamCMD forget the items this run is about to ask for.
+///
+/// SteamCMD treats an item it remembers in `appworkshop_<appid>.acf` as
+/// current: a `workshop_download_item` for such an item can answer
+/// "Success." without producing any content (its Workshop update quirk),
+/// leaving the staging directory empty and the update stuck in
+/// "SteamCMD did not produce a download" retries forever.
+///
+/// Removing the app's ACF file and the items' content directories — the
+/// same workaround every server mod script applies — forces SteamCMD to
+/// fetch the current version as if the item were new. Partial downloads in
+/// `steamapps/workshop/downloads` are deliberately left alone: those are
+/// what make a timed-out item resumable across attempts.
+///
+/// The manifest is the record of truth for what is installed; the ACF is
+/// SteamCMD scratch state and is rewritten by the very next invocation.
+fn forget_steamcmd_items(args: &SyncArgs, mod_ids: &[String]) {
+    if mod_ids.is_empty() {
+        return;
+    }
+    let workshop = args.steamcmd_dir.join("steamapps/workshop");
+    let _ = fs::remove_file(workshop.join(format!("appworkshop_{}.acf", args.app_id)));
+    for mod_id in mod_ids {
+        let _ = fs::remove_dir_all(workshop_content_path(
+            &args.steamcmd_dir,
+            args.app_id,
+            mod_id,
+        ));
+    }
 }
 
 fn build_remote_metadata(
@@ -859,6 +903,61 @@ mod tests {
         }];
         let remote = build_remote_metadata(&requested, &[], Some(&HashMap::new()));
         assert!(!remote[0].deleted);
+    }
+
+    #[test]
+    fn forgetting_steamcmd_items_spares_resumable_partials() {
+        let suffix = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+        let root = std::env::temp_dir().join(format!("swmctl-forget-{suffix}"));
+        let workshop = root.join("steamapps/workshop");
+        let acf = workshop.join("appworkshop_107410.acf");
+        let content = workshop.join("content/107410/111");
+        let partial = workshop.join("downloads/111");
+        fs::create_dir_all(&content).expect("content dir should be created");
+        fs::create_dir_all(&partial).expect("partial dir should be created");
+        fs::write(&acf, "\"AppWorkshop\"\n{\n}").expect("ACF should be written");
+        fs::write(content.join("mod.txt"), b"installed").expect("content should be written");
+        fs::write(partial.join("chunk.bin"), b"partial").expect("partial should be written");
+
+        let args = SyncArgs {
+            app_id: 107410,
+            mod_ids: vec!["111".into()],
+            mod_list: None,
+            collection: None,
+            steamcmd: "steamcmd".into(),
+            steamcmd_dir: root.clone(),
+            output: root.join("out"),
+            manifest: None,
+            name_mode: NameMode::ModId,
+            name_prefix: String::new(),
+            max_retries: 3,
+            retry_delay: 30,
+            batch_size: 1,
+            dry_run: false,
+            quiet: false,
+            delete_unrequested: false,
+            delete_unavailable: false,
+            username: None,
+            password: None,
+        };
+
+        forget_steamcmd_items(&args, &["111".to_string()]);
+
+        assert!(
+            !acf.exists(),
+            "the ACF must be forgotten so SteamCMD fetches the item fresh"
+        );
+        assert!(
+            !content.exists(),
+            "the item content must be forgotten so SteamCMD fetches the item fresh"
+        );
+        assert_eq!(
+            fs::read_to_string(partial.join("chunk.bin")).unwrap(),
+            "partial",
+            "a resumable partial download must survive the forget step"
+        );
+
+        fs::remove_dir_all(root).expect("test directory should be removable");
     }
 
     #[test]

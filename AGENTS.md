@@ -80,6 +80,30 @@ user to guess:
 - **Timeouts** are reported as timeouts, not as a missing download — see
   `timeout_hint`.
 
+### Workshop updates: SteamCMD answers with an empty success
+
+SteamCMD remembers every item it downloaded in
+`appworkshop_<appid>.acf`. A later `+workshop_download_item` for an item it
+considers current can print `Success. Downloaded item <id> to ...` while
+delivering nothing — the well-known "SteamCMD does not update Workshop mods"
+behaviour that server mod scripts work around by deleting the item's cache
+before asking again.
+
+- **swmctl clears SteamCMD's memory before every run** (`forget_steamcmd_items`):
+  the app's ACF and the pending items' content directories are removed before
+  the attempt loop, so every item swmctl asks for is fetched fresh, as if new.
+  This is the community workaround, applied only to the items actually being
+  requested — items that are already in place are never re-downloaded.
+- **Resumable partials are not touched.** `steamapps/workshop/downloads/<id>`
+  keeps its bytes across the forget step, so a timed-out item still resumes
+  (see the timeout section above).
+- **The manifest records what SteamCMD actually delivered.** Timestamps are
+  re-read from the ACF after each attempt and stored only then. A manifest
+  built from the pre-run snapshot can lag one version behind — it re-plans
+  the same update every run, and SteamCMD keeps answering that request with an
+  empty success, which surfaces as a permanently failing run. An API-down
+  fallback run therefore converges in one pass instead of looping.
+
 ### Relative install directories
 
 SteamCMD resolves a relative `+force_install_dir` against its own installation
