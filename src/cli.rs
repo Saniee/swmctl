@@ -308,20 +308,17 @@ fn run_sync(mut args: SyncArgs) -> Result<(), Error> {
         report.warn("skipping --delete-unavailable: Workshop metadata is unavailable this run");
     }
 
-    // Without the Web API there is no remote version signal: SteamCMD's cache
-    // only records the last download, on its own clock, so nothing can be
-    // proven up to date. Fall back to asking SteamCMD about every requested
-    // mod — its own manifest check fetches exactly the items whose files
-    // changed and answers the current ones with an empty success.
-    if !api_available && !entries.is_empty() {
+    // The Web API's metadata is a cached record that can lag real depot
+    // changes by days — Steam's own client and SteamCMD see through to the
+    // live depots, the public details service does not. Its data is used for
+    // names, sizes and availability warnings only, never as the update
+    // decision: every requested mod is fetched fresh on every run, with its
+    // SteamCMD cache cleared first, so SteamCMD always downloads the current
+    // depot version.
+    if !api_available {
         report.warn(
-            "the Steam Workshop metadata API is unreachable; every requested mod is handed to \
-SteamCMD to verify, which downloads only the ones that changed",
-        );
-    } else if !api_available {
-        report.warn(
-            "the Steam Workshop metadata API is unreachable; new mods are still downloaded, and \
-existing ones are verified on a later run when the API responds",
+            "Workshop titles and sizes are unavailable (the metadata API is unreachable); \
+downloads still fetch the current versions directly",
         );
     }
 
@@ -333,20 +330,25 @@ existing ones are verified on a later run when the API responds",
         delete_unavailable,
     );
 
-    let mut pending = if api_available {
-        actions
-            .iter()
-            .filter(|action| matches!(action.action, Action::Download | Action::Update))
-            .map(|action| action.mod_id.clone())
-            .collect::<Vec<_>>()
-    } else {
-        mod_ids.clone()
-    };
     let doomed = actions
         .iter()
         .filter(|action| action.action == Action::Delete)
         .map(|action| action.mod_id.clone())
         .collect::<Vec<_>>();
+    // Everything requested is fetched, except the items already doomed.
+    // Largest first, so the longest transfers are not left stalled at the end.
+    let mut pending = mod_ids
+        .iter()
+        .filter(|mod_id| !doomed.contains(mod_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    pending.sort_by_key(|mod_id| {
+        u64::MAX
+            - remote
+                .iter()
+                .find(|item| item.mod_id == *mod_id)
+                .map_or(0, |item| item.file_size)
+    });
 
     // The script's "in state but not in preset" warning: surface drift even
     // when the user has not opted into deletion.
@@ -362,25 +364,17 @@ existing ones are verified on a later run when the API responds",
     }
 
     report.log(&format!("Requested   : {} mod(s)", mod_ids.len()));
-    if api_available {
-        report.log(&format!("To download : {}", pending.len()));
-    } else {
-        report.log(&format!("To verify   : {} via SteamCMD", pending.len()));
-    }
+    report.log(&format!("To fetch    : {} via SteamCMD", pending.len()));
     report.log(&format!("To delete   : {}", doomed.len()));
     report.log(&format!("Output      : {}", args.output.display()));
     report.log(&format!("SteamCMD dir: {}", args.steamcmd_dir.display()));
 
     if args.dry_run {
+        for mod_id in &pending {
+            println!("Fetch {mod_id}");
+        }
         for action in &actions {
             println!("{:?} {}", action.action, action.mod_id);
-        }
-        if !api_available {
-            for entry in &entries {
-                if mod_ids.contains(&entry.mod_id) {
-                    println!("Verify {} via SteamCMD", entry.mod_id);
-                }
-            }
         }
         report.log("dry run — nothing was downloaded, moved, or deleted");
         return Ok(());
@@ -417,14 +411,12 @@ existing ones are verified on a later run when the API responds",
         "Batch size  : {batch_size} item(s) per SteamCMD run"
     ));
 
-    // SteamCMD can answer an update request with an empty success when the
-    // ACF still records the item, so forget everything we are about to ask
-    // for. Each pending item is then fetched fresh, as if new. The API-less
-    // fallback must NOT forget: there SteamCMD's own manifest check is the
-    // update decision, and a cleared cache would re-download everything.
-    if api_available {
-        forget_steamcmd_items(&args, &pending);
-    }
+    // SteamCMD can answer a download request with an empty success for an item
+    // its cache already records, so every requested item's cache is cleared
+    // first — the standard Workshop workaround that forces a fresh fetch of
+    // the current depot version. Partial downloads survive the forget step
+    // and still resume across attempts (see AGENTS.md).
+    forget_steamcmd_items(&args, &pending);
 
     for attempt in 1..=attempts {
         if pending.is_empty() {
@@ -443,7 +435,7 @@ existing ones are verified on a later run when the API responds",
             // handing over.
             for mod_id in batch {
                 report.log(&format!(
-                    "Downloading : {}",
+                    "Fetching : {}",
                     download_label(remote.iter().find(|item| item.mod_id == *mod_id), mod_id)
                 ));
             }
@@ -470,7 +462,7 @@ existing ones are verified on a later run when the API responds",
 
         failures.clear();
         let mut still_pending = Vec::new();
-        // Re-read SteamCMD's cache so the fallback size source is current;
+        // Re-read SteamCMD's cache so the size fallback stays current;
         // version metadata itself always comes from the Web API (see
         // build_remote_metadata), never from this cache.
         let fresh_metadata = read_acf(&metadata_path)?;
@@ -481,23 +473,6 @@ existing ones are verified on a later run when the API responds",
                 .iter()
                 .find(|entry| entry.mod_id == *mod_id)
                 .cloned();
-            // API-less runs hand every requested mod to SteamCMD. An item
-            // SteamCMD considers current comes back with an empty staging
-            // directory — that is its "unchanged" answer, not a failure, so
-            // long as a copy is already in place.
-            if !api_available
-                && previous.as_ref().is_some_and(|entry| {
-                    let source = workshop_content_path(&args.steamcmd_dir, args.app_id, mod_id);
-                    !source.is_dir()
-                        && args
-                            .output
-                            .join(resolved_directory_name(&args, entry))
-                            .is_dir()
-                })
-            {
-                report.log(&format!("{mod_id}: unchanged — left in place"));
-                continue;
-            }
 
             match place_requested(&args, &fresh_remote, mod_id, previous.as_ref()) {
                 Ok(entry) => {
@@ -535,14 +510,6 @@ existing ones are verified on a later run when the API responds",
 
     let deleted = apply_deletions(&args, &entries, &doomed, &report);
     entries.retain(|entry| !doomed.contains(&entry.mod_id));
-
-    // Record Steam's content handle for every entry the API can describe, so
-    // update checks compare file handles from the next run on. Timestamps can
-    // lag an update inside Steam's cache, and a handle mismatch is definitive;
-    // the handles are recorded without re-downloading anything.
-    if api_available {
-        backfill_content_handles(&mut entries, published_files.as_ref());
-    }
 
     // Save before reporting failures: mods already on disk must be recorded
     // even when the run as a whole did not succeed.
@@ -742,29 +709,6 @@ fn forget_steamcmd_items(args: &SyncArgs, mod_ids: &[String]) {
             args.app_id,
             mod_id,
         ));
-    }
-}
-
-/// Fill in Steam's content handle for manifest entries the API can describe.
-///
-/// A handle recorded without downloading anything arms the file-change check
-/// for the next run: from then on an update is decided by whether the handle
-/// moved, which stays correct even when Steam's cached timestamps lag.
-fn backfill_content_handles(
-    entries: &mut [ManifestEntry],
-    published_files: Option<&HashMap<String, crate::steam_api::PublishedFile>>,
-) {
-    let Some(files) = published_files else {
-        return;
-    };
-    for entry in entries {
-        if entry.content_handle.is_none()
-            && let Some(handle) = files
-                .get(&entry.mod_id)
-                .and_then(|file| file.hcontent_file.clone())
-        {
-            entry.content_handle = Some(handle);
-        }
     }
 }
 

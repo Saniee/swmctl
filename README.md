@@ -4,12 +4,13 @@
 
 `swmctl` is a command-line tool for keeping Steam Workshop mods synchronized with a local game-server directory.
 
-It uses SteamCMD as the source of truth, compares Workshop metadata with a local manifest, and performs only the downloads, updates, and deletes required to reach the requested state.
+It fetches every requested mod fresh through SteamCMD — the one operation that talks to the live depots — because Steam's public metadata can lag real Workshop updates by days. A local JSON manifest records what was placed and drives deletion checks.
 
 ## Features
 
-- Download and update Workshop mods by ID.
-- Compare remote metadata with a local minified JSON manifest.
+- Download the current version of Workshop mods by ID, on every run.
+- Verify every mod through SteamCMD itself, bypassing stale metadata caches.
+- Record placed mods in a local minified JSON manifest.
 - Remove mods no longer requested, with independent deletion checks.
 - Rename folders by mod ID or sanitized Workshop name, with an optional prefix (`@` for Arma).
 - Sanitize names for restrictive game servers such as Arma.
@@ -122,9 +123,9 @@ Use `--dry-run` to preview planned actions before running for real.
 
 Useful options include `--output`, `--manifest`, `--steamcmd`, `--steamcmd-dir`, `--name-mode`, `--name-prefix`, `--max-retries`, `--retry-delay`, `--batch-size`, `--dry-run`, and `--quiet`.
 
-`--batch-size` sets how many Workshop items are handed to a single SteamCMD invocation. It defaults to `1`; raise it to pay fewer SteamCMD startups on large presets.
+`--batch-size` sets how many Workshop items are handed to a single SteamCMD invocation. It defaults to `1`; raise it to pay fewer SteamCMD startups on large presets. Every run downloads the full requested list fresh — that is the point of the tool — so a daily cron should use a batch size that finishes quickly, while an on-demand sync can keep the default. `--dry-run` lists exactly what a run would fetch and delete.
 
-The Steam Web API base URL is overridable with the `SWMCTL_API_BASE_URL` environment variable, for mirrors and API gateways. When the API is unreachable, update checks fall back to asking SteamCMD directly: mods that changed are downloaded, mods SteamCMD considers current are left in place.
+The Steam Web API base URL is overridable with the `SWMCTL_API_BASE_URL` environment variable, for mirrors and API gateways. Its data (titles, sizes, availability) is informational; downloads always come from SteamCMD regardless of the API's state.
 
 ## Authentication
 

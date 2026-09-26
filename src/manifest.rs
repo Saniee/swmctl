@@ -106,6 +106,12 @@ pub fn save(path: &Path, entries: &[ManifestEntry]) -> Result<(), ManifestError>
     })
 }
 
+/// The deletions to apply, per the `--delete-*` flags.
+///
+/// Downloads and updates are not classified here: every requested mod is
+/// fetched fresh every run (see the fetch-everything contract in cli.rs), so
+/// deciding between Download and Update in advance would only risk trusting
+/// Steam's cached metadata, which lags real depot changes.
 pub fn plan(
     requested_ids: &[String],
     remote: &[RemoteMod],
@@ -114,26 +120,6 @@ pub fn plan(
     delete_unavailable: bool,
 ) -> Vec<PlannedAction> {
     let mut actions = Vec::new();
-
-    for item in remote {
-        if !requested_ids.iter().any(|id| id == &item.mod_id) {
-            continue;
-        }
-
-        match existing.iter().find(|entry| entry.mod_id == item.mod_id) {
-            None => actions.push(PlannedAction {
-                action: Action::Download,
-                mod_id: item.mod_id.clone(),
-            }),
-            Some(previous) if update_needed(item, previous) => {
-                actions.push(PlannedAction {
-                    action: Action::Update,
-                    mod_id: item.mod_id.clone(),
-                });
-            }
-            Some(_) => {}
-        }
-    }
 
     for entry in existing {
         let requested = requested_ids.iter().any(|id| id == &entry.mod_id);
@@ -164,41 +150,6 @@ pub fn plan(
     actions
 }
 
-/// Whether a remote record claims the installed copy is out of date.
-///
-/// The Steam content handle is the primary signal: it changes exactly when
-/// the item's files change, so two equal handles mean the files are the same
-/// regardless of what the cached timestamps claim. Timestamps remain the
-/// fallback for manifests that predate handle recording, and for items the
-/// Web API cannot describe.
-fn update_needed(remote: &RemoteMod, previous: &ManifestEntry) -> bool {
-    // A record claiming the item is newer than Steam says the item ever was
-    // is not a real remote timestamp: it is the local clock, written by an
-    // old API-less run that used SteamCMD's cache as if it were remote data.
-    // Such an entry cannot be trusted as current and needs one refresh.
-    let time_impossible = remote
-        .last_updated
-        .is_some_and(|remote_time| previous.last_updated > Some(remote_time));
-
-    match &remote.content_handle {
-        // The handle is authoritative when both sides know it: files changed
-        // iff the handle changed. A description-only edit moves the remote
-        // timestamp without touching the handle, and must not trigger a
-        // pointless re-download.
-        Some(handle) => match &previous.content_handle {
-            Some(previous_handle) => previous_handle != handle || time_impossible,
-            // The manifest predates handle recording. Keep the timestamp rule
-            // until a handle is recorded, so arming handles never forces an
-            // immediate re-download of every mod.
-            None => time_impossible || remote.last_updated > previous.last_updated,
-        },
-        // No handle this run (item invisible to the API, or the API was
-        // unreachable): timestamps are the only signal left, and an
-        // impossible one still forces a refresh.
-        None => time_impossible || remote.last_updated > previous.last_updated,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,116 +178,32 @@ mod tests {
     }
 
     #[test]
-    fn plans_largest_download_first() {
-        let requested = vec!["small".into(), "large".into()];
-        let remote = vec![remote("small", 10, 1), remote("large", 20, 1)];
-        let actions = plan(&requested, &remote, &[], true, false);
-
-        assert_eq!(actions[0].mod_id, "large");
-        assert_eq!(actions[1].mod_id, "small");
-    }
-
-    #[test]
-    fn plans_update_and_configurable_delete() {
+    fn plans_only_deletions() {
+        // plan() never classifies downloads or updates: every requested mod is
+        // fetched fresh by the run loop, so nothing here may come back as
+        // Download or Update.
         let existing = vec![entry("old"), entry("missing")];
-        let remote = vec![remote("old", 10, 2)];
         let requested = vec!["old".into()];
-        let actions = plan(&requested, &remote, &existing, true, false);
+        let actions = plan(&requested, &[remote("old", 10, 2)], &existing, true, false);
 
-        assert!(actions.contains(&PlannedAction {
-            action: Action::Update,
-            mod_id: "old".into()
-        }));
+        assert!(actions.iter().all(|action| action.action == Action::Delete));
         assert!(actions.contains(&PlannedAction {
             action: Action::Delete,
             mod_id: "missing".into()
         }));
-    }
-
-    /// A changed Steam content handle is definitive proof the files changed,
-    /// even when the cached timestamps did not move.
-    #[test]
-    fn plans_update_when_the_content_handle_changes() {
-        let existing = vec![ManifestEntry {
-            content_handle: Some("HANDLE-1".into()),
-            ..entry("old")
-        }];
-        let remote_items = vec![RemoteMod {
-            content_handle: Some("HANDLE-2".into()),
-            ..remote("old", 10, 5)
-        }];
-        let actions = plan(&["old".into()], &remote_items, &existing, false, false);
-
-        assert!(actions.contains(&PlannedAction {
-            action: Action::Update,
-            mod_id: "old".into()
-        }));
-    }
-
-    /// Equal handles mean identical files: a newer timestamp without a handle
-    /// change is a description or tag edit, which needs no re-download.
-    #[test]
-    fn equal_handles_suppress_updates_even_with_newer_timestamps() {
-        let existing = vec![ManifestEntry {
-            content_handle: Some("HANDLE-1".into()),
-            last_updated: Some(5),
-            ..entry("old")
-        }];
-        let remote_items = vec![RemoteMod {
-            content_handle: Some("HANDLE-1".into()),
-            last_updated: Some(9),
-            ..remote("old", 10, 5)
-        }];
-        let actions = plan(&["old".into()], &remote_items, &existing, false, false);
-
-        assert!(!actions.iter().any(|action| action.mod_id == "old"));
-    }
-
-    /// Manifests written before handles were recorded keep the timestamp rule
-    /// until a handle is recorded, so arming handles never re-downloads every
-    /// mod at once.
-    #[test]
-    fn legacy_entries_without_a_handle_keep_the_timestamp_rule() {
-        let existing = vec![ManifestEntry {
-            last_updated: Some(5), // same as the remote's timestamp
-            ..entry("old")
-        }];
-        let remote_items = vec![RemoteMod {
-            content_handle: Some("HANDLE-1".into()),
-            last_updated: Some(5),
-            ..remote("old", 10, 5)
-        }];
-        // Same timestamp, fresh handle: no mass refresh.
-        assert!(plan(&["old".into()], &remote_items, &existing, false, false).is_empty());
-        // A newer timestamp still updates.
-        let newer = vec![RemoteMod {
-            last_updated: Some(6),
-            ..remote("old", 10, 5)
-        }];
         assert!(
-            plan(&["old".into()], &newer, &existing, false, false).contains(&PlannedAction {
-                action: Action::Update,
-                mod_id: "old".into()
-            })
+            !actions.iter().any(|action| action.mod_id == "old"),
+            "a requested entry is fetched, never deleted"
         );
     }
 
-    /// A recorded timestamp newer than the item's real update history cannot
-    /// come from Steam: it is a local clock written by an old API-less run,
-    /// and the entry must refresh once instead of being trusted as current.
     #[test]
-    fn refreshes_entries_whose_timestamp_is_impossible() {
-        let existing = vec![ManifestEntry {
-            last_updated: Some(10),
-            ..entry("old")
-        }];
-        let remote = vec![remote("old", 10, 5)]; // Steam says the item is older
+    fn without_delete_flags_nothing_is_planned() {
+        let existing = vec![entry("old"), entry("missing")];
+        let requested = vec!["old".into()];
+        let actions = plan(&requested, &[remote("old", 10, 2)], &existing, false, false);
 
-        let actions = plan(&["old".into()], &remote, &existing, false, false);
-        assert!(actions.contains(&PlannedAction {
-            action: Action::Update,
-            mod_id: "old".into()
-        }));
+        assert!(actions.is_empty());
     }
 
     /// Regression for the `--delete-unavailable` data-loss bug: a mod that is

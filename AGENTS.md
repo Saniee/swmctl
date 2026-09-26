@@ -80,37 +80,42 @@ user to guess:
 - **Timeouts** are reported as timeouts, not as a missing download — see
   `timeout_hint`.
 
-### Workshop updates: SteamCMD answers with an empty success
+### Workshop updates: fetch everything, every time
 
-SteamCMD remembers every item it downloaded in `appworkshop_<appid>.acf`.
-A later `+workshop_download_item` for an item it considers current can print
+SteamCMD remembers every item it downloaded in `appworkshop_<appid>.acf`, and
+a `+workshop_download_item` for an item it considers current can print
 `Success. Downloaded item <id> to ...` while delivering nothing — the
 well-known "SteamCMD does not update Workshop mods" behaviour that server mod
-scripts work around by deleting the item's cache before asking again.
+scripts (luttum and friends) work around by deleting the item's cache first.
 
-Update decisions have two regimes, selected by whether the Web API answered:
+Holding that thought together with the Web API's caching tells you why the
+update decision can never be trusted to metadata:
 
-- **Web API up:** version checks compare Steam's content handle
-  (`hcontent_file`, the truly authoritative "files changed" signal) and the
-  item's update time against the manifest. `forget_steamcmd_items` clears the
-  app's ACF and the pending items' content directories before downloading, so
-  SteamCMD cannot answer the request with an empty success. The handle and
-  time come from the API alone; SteamCMD's cache is local state seeded with
-  its own clock and is never treated as a remote version. A recorded
-  timestamp newer than the item's real update history (the signature of an
-  old run that recorded the cache's clock) forces one refresh, then heals.
-- **Web API down:** there is no remote version signal at all, so nothing can
-  be classified as up to date. swmctl hands every requested mod to SteamCMD
-  and lets SteamCMD's own manifest-hash check decide: changed items come back
-  with content, unchanged ones with an empty staging directory. That empty
-  answer is treated as "unchanged" (not a failure) when a copy is already in
-  place, so API-less runs verify without re-downloading and without the
-  manifest being poisoned by SteamCMD's clock. `forget_steamcmd_items` is
-  skipped in this regime — clearing the cache would defeat the hash check and
-  re-download everything.
+- **The public details API lags the real depots.** `time_updated` and
+  `hcontent_file` are served from a cache that can sit days behind an actual
+  content update — Steam's own client and SteamCMD see through to the live
+  depots, the details service does not. A mod that "just updated" in the
+  launcher can show its old timestamp and handle for days, so any tool that
+  plans around those values silently skips real updates.
+- **SteamCMD's own check is unreliable as a gate.** Its skip decision depends
+  on the ACF record, which is exactly the state the workaround exists to
+  clear; and an authenticated `workshop_download_item` is the one operation
+  that does reach the live depots.
 
-Resumable partials (`steamapps/workshop/downloads/<id>`) are never touched by
-either regime, so a timed-out item still resumes across attempts (see above).
+So `swmctl` fetches every requested mod on every run (`forget_steamcmd_items`
+clears the app's ACF and each requested item's content directory before the
+attempt loop, forcing a fresh fetch of the current depot version). The Web
+API contributes titles, sizes and availability warnings only — never the
+update decision.
+
+- **Resumable partials survive the forget step** (`steamapps/workshop/downloads/<id>`
+  is not touched), so a timed-out item still resumes across attempts.
+- **The manifest records what was placed** — including Steam's content handle
+  and timestamp when the API supplied them — so deletions and unrequested
+  detection keep working, but it never gates a fetch.
+- **Cost is honest:** every run re-downloads the requested list. Raise
+  `--batch-size` to pay fewer SteamCMD startups; unchanged mods cannot be
+  skipped safely because staleness is invisible from the caller's side.
 
 ### Relative install directories
 

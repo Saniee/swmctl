@@ -2,56 +2,51 @@
 
 ## Overview
 
-`swmctl` uses SteamCMD as its source of truth for Steam Workshop mod
-metadata, reconciles that against a local manifest, and performs the
-minimum set of download/update/delete actions needed to bring a mod
-directory in sync — renaming and sanitizing filenames along the way so
-output is safe for restrictive game servers.
+`swmctl` fetches every requested Workshop mod fresh through SteamCMD — the
+one operation that speaks to the live depots — reconciles the results
+against a local manifest, performs deletion checks, and renames/sanitizes
+folders so output is safe for restrictive game servers.
 
 ## Core workflow
 
 1. **Gather metadata**
    For a given mod ID, text file of mod IDs, or Steam Workshop collection,
-   gather current Workshop metadata (title, size, last-updated timestamp).
+   gather Workshop metadata (title, size, availability).
 
-   Two sources are used, in this order:
+   The public Steam Web API (`GetPublishedFileDetails`) supplies titles,
+   sizes and availability, queried anonymously and in batches. The API is
+   read-only and is never used for authentication — downloads remain
+   entirely SteamCMD's responsibility. Because the request is anonymous,
+   private and login-gated items are invisible to it; such items are treated
+   as *unknown*, never as unavailable, so they are never deleted.
 
-   - The public Steam Web API (`GetPublishedFileDetails`). SteamCMD's own
-     metadata only covers items already downloaded, so it cannot describe a
-     mod being requested for the first time; the Web API can. It is queried
-     anonymously and in batches. Its `hcontent_file` content handle is the
-     authoritative "files changed" signal, and `time_updated` the fallback.
-   - SteamCMD's `appworkshop_<appid>.acf`, used for the size when the Web API
-     is unavailable or omits it. Its timestamps are a local record seeded
-     with SteamCMD's own clock, so they are never treated as remote version
-     data — trusting them is how update checks die.
+   **The API's version fields are never trusted as an update signal.** The
+   details service serves a cache that can lag real depot changes by days
+   (`time_updated` and `hcontent_file` both), so anything decided from them
+   silently skips real updates. SteamCMD's `appworkshop_<appid>.acf`
+   contributes only a size fallback.
 
-   The Web API is read-only metadata and is never used for authentication —
-   downloads remain entirely SteamCMD's responsibility. Because the request is
-   anonymous, private and login-gated items are invisible to it; such items are
-   treated as *unknown*, never as unavailable, so they are never deleted.
+2. **Classify deletions**
+   Compare the manifest against the requested list and the fetched metadata,
+   and plan only deletions:
+   - Managed but not in the requested list — removed with
+     `--delete-unrequested`.
+   - Reported deleted by the Workshop — removed with `--delete-unavailable`.
+   Each check is independently configurable (on/off), and a mod absent from
+   the current request is never treated as unavailable.
 
-   When the Web API cannot be reached there is no remote version signal, so
-   nothing can be classified as up to date. Existing mods are then handed to
-   SteamCMD anyway and its own manifest-hash check decides what to fetch:
-   changed items come back with content, unchanged ones with an empty answer
-   that swmctl reads as "left in place". New mods download as usual.
+   Nothing is classified as Download or Update: every requested mod is
+   fetched on every run (see below).
 
-2. **Diff against the manifest**
-   Compare the fetched info against the existing local manifest (if one
-   exists) and classify each mod as one of:
-   - **Download** — not present locally
-   - **Update** — present, but remote version is newer
-   - **Delete** — present locally, and either no longer in the requested
-     list, and/or (if enabled) reported deleted by the Workshop.
-     Each check is independently configurable (on/off), and a mod absent
-     from the current request is never treated as unavailable.
-
-3. **Execute via SteamCMD**
-   For anything flagged download/update, fetch the mod through SteamCMD.
-   SteamCMD may exit successfully while silently omitting individual items, so
-   what actually arrived on disk is checked per item and only the missing ones
-   are retried, up to `--max-retries`.
+3. **Fetch everything via SteamCMD**
+   Every requested mod's SteamCMD cache is cleared first — the app's ACF and
+   the item's content directory — which is the standard Workshop workaround
+   that forces `+workshop_download_item` to download the current depot
+   version rather than answer with an empty success. SteamCMD may exit
+   successfully while silently omitting individual items, so what actually
+   arrived on disk is checked per item and only the missing ones are
+   retried, up to `--max-retries`. Partial downloads in
+   `steamapps/workshop/downloads` survive the cache clear and resume.
 
 4. **Place and rename**
    Once a download finishes, move the mod into:
@@ -88,7 +83,9 @@ a straightforward follow-up without changing the schema.
 - Date downloaded / last updated
 - Mod name
 - Mod ID
-- File size (used to prioritize ordering in subsequent download runs)
+- File size (used to order fetches)
+- Steam content handle and update timestamp when the API supplied them
+  (informational; never gates a fetch)
 
 ## Configurable via arguments
 
@@ -99,6 +96,5 @@ a straightforward follow-up without changing the schema.
 
 ## File size prioritization
 
-When multiple mods are queued for download/update, largest first —
-front-loads the longest transfers so they aren't left stalled at the end
-of a run.
+Fetches are ordered largest first — front-loads the longest transfers so
+they aren't left stalled at the end of a run.
