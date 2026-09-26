@@ -19,17 +19,23 @@ output is safe for restrictive game servers.
    - The public Steam Web API (`GetPublishedFileDetails`). SteamCMD's own
      metadata only covers items already downloaded, so it cannot describe a
      mod being requested for the first time; the Web API can. It is queried
-     anonymously and in batches.
-   - SteamCMD's `appworkshop_<appid>.acf`, used to fill in size and timestamp
-     when the Web API is unavailable or omits them.
+     anonymously and in batches. Its `hcontent_file` content handle is the
+     authoritative "files changed" signal, and `time_updated` the fallback.
+   - SteamCMD's `appworkshop_<appid>.acf`, used for the size when the Web API
+     is unavailable or omits it. Its timestamps are a local record seeded
+     with SteamCMD's own clock, so they are never treated as remote version
+     data — trusting them is how update checks die.
 
    The Web API is read-only metadata and is never used for authentication —
    downloads remain entirely SteamCMD's responsibility. Because the request is
    anonymous, private and login-gated items are invisible to it; such items are
    treated as *unknown*, never as unavailable, so they are never deleted.
 
-   When the Web API cannot be reached, planning falls back to the ACF data and
-   the existing manifest rather than re-downloading everything.
+   When the Web API cannot be reached there is no remote version signal, so
+   nothing can be classified as up to date. Existing mods are then handed to
+   SteamCMD anyway and its own manifest-hash check decides what to fetch:
+   changed items come back with content, unchanged ones with an empty answer
+   that swmctl reads as "left in place". New mods download as usual.
 
 2. **Diff against the manifest**
    Compare the fetched info against the existing local manifest (if one

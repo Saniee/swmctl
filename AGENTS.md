@@ -82,27 +82,35 @@ user to guess:
 
 ### Workshop updates: SteamCMD answers with an empty success
 
-SteamCMD remembers every item it downloaded in
-`appworkshop_<appid>.acf`. A later `+workshop_download_item` for an item it
-considers current can print `Success. Downloaded item <id> to ...` while
-delivering nothing — the well-known "SteamCMD does not update Workshop mods"
-behaviour that server mod scripts work around by deleting the item's cache
-before asking again.
+SteamCMD remembers every item it downloaded in `appworkshop_<appid>.acf`.
+A later `+workshop_download_item` for an item it considers current can print
+`Success. Downloaded item <id> to ...` while delivering nothing — the
+well-known "SteamCMD does not update Workshop mods" behaviour that server mod
+scripts work around by deleting the item's cache before asking again.
 
-- **swmctl clears SteamCMD's memory before every run** (`forget_steamcmd_items`):
-  the app's ACF and the pending items' content directories are removed before
-  the attempt loop, so every item swmctl asks for is fetched fresh, as if new.
-  This is the community workaround, applied only to the items actually being
-  requested — items that are already in place are never re-downloaded.
-- **Resumable partials are not touched.** `steamapps/workshop/downloads/<id>`
-  keeps its bytes across the forget step, so a timed-out item still resumes
-  (see the timeout section above).
-- **The manifest records what SteamCMD actually delivered.** Timestamps are
-  re-read from the ACF after each attempt and stored only then. A manifest
-  built from the pre-run snapshot can lag one version behind — it re-plans
-  the same update every run, and SteamCMD keeps answering that request with an
-  empty success, which surfaces as a permanently failing run. An API-down
-  fallback run therefore converges in one pass instead of looping.
+Update decisions have two regimes, selected by whether the Web API answered:
+
+- **Web API up:** version checks compare Steam's content handle
+  (`hcontent_file`, the truly authoritative "files changed" signal) and the
+  item's update time against the manifest. `forget_steamcmd_items` clears the
+  app's ACF and the pending items' content directories before downloading, so
+  SteamCMD cannot answer the request with an empty success. The handle and
+  time come from the API alone; SteamCMD's cache is local state seeded with
+  its own clock and is never treated as a remote version. A recorded
+  timestamp newer than the item's real update history (the signature of an
+  old run that recorded the cache's clock) forces one refresh, then heals.
+- **Web API down:** there is no remote version signal at all, so nothing can
+  be classified as up to date. swmctl hands every requested mod to SteamCMD
+  and lets SteamCMD's own manifest-hash check decide: changed items come back
+  with content, unchanged ones with an empty staging directory. That empty
+  answer is treated as "unchanged" (not a failure) when a copy is already in
+  place, so API-less runs verify without re-downloading and without the
+  manifest being poisoned by SteamCMD's clock. `forget_steamcmd_items` is
+  skipped in this regime — clearing the cache would defeat the hash check and
+  re-download everything.
+
+Resumable partials (`steamapps/workshop/downloads/<id>`) are never touched by
+either regime, so a timed-out item still resumes across attempts (see above).
 
 ### Relative install directories
 

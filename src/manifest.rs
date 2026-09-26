@@ -13,6 +13,11 @@ pub struct ManifestEntry {
     pub last_updated: Option<i64>,
     #[serde(default)]
     pub directory_name: String,
+    /// Steam's content handle for the installed files, recorded from the Web
+    /// API at download time. A different handle in a later run is definitive
+    /// proof the remote files changed.
+    #[serde(default)]
+    pub content_handle: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +26,9 @@ pub struct RemoteMod {
     pub mod_id: String,
     pub file_size: u64,
     pub last_updated: Option<i64>,
+    /// Steam's content handle for the item's current files, taking precedence
+    /// over `last_updated` when both are known.
+    pub content_handle: Option<String>,
     /// `true` when Steam positively reported the item as deleted. An item that
     /// is merely invisible to an unauthenticated request is not unavailable —
     /// SteamCMD may still fetch it with credentials.
@@ -117,7 +125,7 @@ pub fn plan(
                 action: Action::Download,
                 mod_id: item.mod_id.clone(),
             }),
-            Some(previous) if item.last_updated > previous.last_updated => {
+            Some(previous) if update_needed(item, previous) => {
                 actions.push(PlannedAction {
                     action: Action::Update,
                     mod_id: item.mod_id.clone(),
@@ -156,6 +164,41 @@ pub fn plan(
     actions
 }
 
+/// Whether a remote record claims the installed copy is out of date.
+///
+/// The Steam content handle is the primary signal: it changes exactly when
+/// the item's files change, so two equal handles mean the files are the same
+/// regardless of what the cached timestamps claim. Timestamps remain the
+/// fallback for manifests that predate handle recording, and for items the
+/// Web API cannot describe.
+fn update_needed(remote: &RemoteMod, previous: &ManifestEntry) -> bool {
+    // A record claiming the item is newer than Steam says the item ever was
+    // is not a real remote timestamp: it is the local clock, written by an
+    // old API-less run that used SteamCMD's cache as if it were remote data.
+    // Such an entry cannot be trusted as current and needs one refresh.
+    let time_impossible = remote
+        .last_updated
+        .is_some_and(|remote_time| previous.last_updated > Some(remote_time));
+
+    match &remote.content_handle {
+        // The handle is authoritative when both sides know it: files changed
+        // iff the handle changed. A description-only edit moves the remote
+        // timestamp without touching the handle, and must not trigger a
+        // pointless re-download.
+        Some(handle) => match &previous.content_handle {
+            Some(previous_handle) => previous_handle != handle || time_impossible,
+            // The manifest predates handle recording. Keep the timestamp rule
+            // until a handle is recorded, so arming handles never forces an
+            // immediate re-download of every mod.
+            None => time_impossible || remote.last_updated > previous.last_updated,
+        },
+        // No handle this run (item invisible to the API, or the API was
+        // unreachable): timestamps are the only signal left, and an
+        // impossible one still forces a refresh.
+        None => time_impossible || remote.last_updated > previous.last_updated,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,6 +209,7 @@ mod tests {
             mod_id: id.into(),
             file_size: size,
             last_updated: Some(updated),
+            content_handle: None,
             deleted: false,
         }
     }
@@ -178,6 +222,7 @@ mod tests {
             file_size: 1,
             last_updated: Some(1),
             directory_name: id.into(),
+            content_handle: None,
         }
     }
 
@@ -205,6 +250,92 @@ mod tests {
         assert!(actions.contains(&PlannedAction {
             action: Action::Delete,
             mod_id: "missing".into()
+        }));
+    }
+
+    /// A changed Steam content handle is definitive proof the files changed,
+    /// even when the cached timestamps did not move.
+    #[test]
+    fn plans_update_when_the_content_handle_changes() {
+        let existing = vec![ManifestEntry {
+            content_handle: Some("HANDLE-1".into()),
+            ..entry("old")
+        }];
+        let remote_items = vec![RemoteMod {
+            content_handle: Some("HANDLE-2".into()),
+            ..remote("old", 10, 5)
+        }];
+        let actions = plan(&["old".into()], &remote_items, &existing, false, false);
+
+        assert!(actions.contains(&PlannedAction {
+            action: Action::Update,
+            mod_id: "old".into()
+        }));
+    }
+
+    /// Equal handles mean identical files: a newer timestamp without a handle
+    /// change is a description or tag edit, which needs no re-download.
+    #[test]
+    fn equal_handles_suppress_updates_even_with_newer_timestamps() {
+        let existing = vec![ManifestEntry {
+            content_handle: Some("HANDLE-1".into()),
+            last_updated: Some(5),
+            ..entry("old")
+        }];
+        let remote_items = vec![RemoteMod {
+            content_handle: Some("HANDLE-1".into()),
+            last_updated: Some(9),
+            ..remote("old", 10, 5)
+        }];
+        let actions = plan(&["old".into()], &remote_items, &existing, false, false);
+
+        assert!(!actions.iter().any(|action| action.mod_id == "old"));
+    }
+
+    /// Manifests written before handles were recorded keep the timestamp rule
+    /// until a handle is recorded, so arming handles never re-downloads every
+    /// mod at once.
+    #[test]
+    fn legacy_entries_without_a_handle_keep_the_timestamp_rule() {
+        let existing = vec![ManifestEntry {
+            last_updated: Some(5), // same as the remote's timestamp
+            ..entry("old")
+        }];
+        let remote_items = vec![RemoteMod {
+            content_handle: Some("HANDLE-1".into()),
+            last_updated: Some(5),
+            ..remote("old", 10, 5)
+        }];
+        // Same timestamp, fresh handle: no mass refresh.
+        assert!(plan(&["old".into()], &remote_items, &existing, false, false).is_empty());
+        // A newer timestamp still updates.
+        let newer = vec![RemoteMod {
+            last_updated: Some(6),
+            ..remote("old", 10, 5)
+        }];
+        assert!(
+            plan(&["old".into()], &newer, &existing, false, false).contains(&PlannedAction {
+                action: Action::Update,
+                mod_id: "old".into()
+            })
+        );
+    }
+
+    /// A recorded timestamp newer than the item's real update history cannot
+    /// come from Steam: it is a local clock written by an old API-less run,
+    /// and the entry must refresh once instead of being trusted as current.
+    #[test]
+    fn refreshes_entries_whose_timestamp_is_impossible() {
+        let existing = vec![ManifestEntry {
+            last_updated: Some(10),
+            ..entry("old")
+        }];
+        let remote = vec![remote("old", 10, 5)]; // Steam says the item is older
+
+        let actions = plan(&["old".into()], &remote, &existing, false, false);
+        assert!(actions.contains(&PlannedAction {
+            action: Action::Update,
+            mod_id: "old".into()
         }));
     }
 
@@ -267,6 +398,7 @@ mod tests {
             file_size: 42,
             last_updated: None,
             directory_name: "123".into(),
+            content_handle: None,
         }];
 
         save(&path, &entries).expect("manifest should save");

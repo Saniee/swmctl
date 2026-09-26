@@ -124,6 +124,8 @@ Useful options include `--output`, `--manifest`, `--steamcmd`, `--steamcmd-dir`,
 
 `--batch-size` sets how many Workshop items are handed to a single SteamCMD invocation. It defaults to `1`; raise it to pay fewer SteamCMD startups on large presets.
 
+The Steam Web API base URL is overridable with the `SWMCTL_API_BASE_URL` environment variable, for mirrors and API gateways. When the API is unreachable, update checks fall back to asking SteamCMD directly: mods that changed are downloaded, mods SteamCMD considers current are left in place.
+
 ## Authentication
 
 Authentication is delegated entirely to SteamCMD. `swmctl` does not implement or cache Steam sessions.

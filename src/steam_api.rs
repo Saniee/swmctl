@@ -4,10 +4,9 @@ use std::time::Duration;
 use serde::Deserialize;
 use thiserror::Error;
 
-const DETAILS_URL: &str =
-    "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/";
-const COLLECTION_URL: &str =
-    "https://api.steampowered.com/ISteamRemoteStorage/GetCollectionDetails/v1/";
+const DETAILS_PATH: &str = "/ISteamRemoteStorage/GetPublishedFileDetails/v1/";
+const COLLECTION_PATH: &str = "/ISteamRemoteStorage/GetCollectionDetails/v1/";
+const API_BASE: &str = "https://api.steampowered.com";
 
 /// Steam rejects very large form posts, and a rejection here costs a full
 /// re-download, so details are requested in batches.
@@ -25,6 +24,11 @@ pub struct PublishedFile {
     pub title: String,
     pub file_size: Option<u64>,
     pub time_updated: Option<i64>,
+    /// Steam's content handle for the item's files. It changes whenever new
+    /// content is published, so a difference between two runs is definitive
+    /// proof the files changed — unlike `time_updated`, which Steam's cache
+    /// can serve stale for a long time after an update.
+    pub hcontent_file: Option<String>,
     /// `true` only when Steam explicitly reported the item as deleted.
     /// Items merely hidden from an unauthenticated request are not deleted.
     pub deleted: bool,
@@ -81,6 +85,7 @@ struct Details {
     title: Option<String>,
     file_size: Option<String>,
     time_updated: Option<i64>,
+    hcontent_file: Option<String>,
     consumer_app_id: Option<u32>,
     creator_app_id: Option<u32>,
 }
@@ -106,6 +111,11 @@ struct CollectionChild {
     publishedfileid: String,
 }
 
+/// Base URL for the Steam Web API, overridable for mirrors and test rigs.
+fn api_base() -> String {
+    std::env::var("SWMCTL_API_BASE_URL").unwrap_or_else(|_| API_BASE.to_string())
+}
+
 fn client() -> Result<reqwest::blocking::Client, SteamApiError> {
     Ok(reqwest::blocking::Client::builder()
         .timeout(REQUEST_TIMEOUT)
@@ -129,7 +139,7 @@ pub fn fetch_published_files(
         }
 
         let response = client
-            .post(DETAILS_URL)
+            .post(format!("{}{}", api_base(), DETAILS_PATH))
             .form(&form)
             .send()?
             .error_for_status()?
@@ -158,6 +168,7 @@ fn parse_published_files(response: DetailsResponse) -> Option<HashMap<String, Pu
                         title: detail.title.unwrap_or_default(),
                         file_size: detail.file_size.and_then(|size| size.parse().ok()),
                         time_updated: detail.time_updated,
+                        hcontent_file: detail.hcontent_file.filter(|handle| !handle.is_empty()),
                         deleted: result == RESULT_FILE_NOT_FOUND,
                         result,
                         // Steam reports the consuming app; the creating app is
@@ -201,7 +212,7 @@ pub fn fetch_collection_items(collection: &str) -> Result<Vec<String>, SteamApiE
         ("publishedfileids[0]", collection_id),
     ];
     let response = client()?
-        .post(COLLECTION_URL)
+        .post(format!("{}{}", api_base(), COLLECTION_PATH))
         .form(&form)
         .send()?
         .error_for_status()?
@@ -230,7 +241,7 @@ mod tests {
     #[test]
     fn parses_api_response_details() {
         let response: DetailsResponse = serde_json::from_str(
-            r#"{"response":{"publishedfiledetails":[{"publishedfileid":"123","result":1,"title":"Example","file_size":"456","time_updated":1700000000}]}}"#,
+            r#"{"response":{"publishedfiledetails":[{"publishedfileid":"123","result":1,"title":"Example","file_size":"456","time_updated":1700000000,"hcontent_file":"9876543210"}]}}"#,
         )
         .expect("response should parse");
         let files = parse_published_files(response).expect("details should be present");
@@ -238,6 +249,7 @@ mod tests {
         assert_eq!(files["123"].file_size, Some(456));
         assert!(!files["123"].deleted);
         assert_eq!(files["123"].result, 1);
+        assert_eq!(files["123"].hcontent_file.as_deref(), Some("9876543210"));
         assert!(files["123"].unavailable_reason().is_none());
     }
 
