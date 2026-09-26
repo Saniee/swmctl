@@ -79,6 +79,11 @@ pub struct SyncArgs {
     /// Report the planned actions without downloading, moving, or deleting.
     #[arg(long)]
     pub dry_run: bool,
+    /// Re-fetch every requested mod from scratch, clearing SteamCMD's cache
+    /// for each first. Without it, SteamCMD skips mods whose cached version
+    /// already matches the live depot, so only changed mods download.
+    #[arg(long)]
+    pub force_refresh: bool,
     /// Suppress progress output. Errors and warnings are still reported.
     #[arg(long, short)]
     pub quiet: bool,
@@ -115,6 +120,7 @@ impl fmt::Debug for SyncArgs {
             .field("retry_delay", &self.retry_delay)
             .field("batch_size", &self.batch_size)
             .field("dry_run", &self.dry_run)
+            .field("force_refresh", &self.force_refresh)
             .field("quiet", &self.quiet)
             .field("delete_unrequested", &self.delete_unrequested)
             .field("delete_unavailable", &self.delete_unavailable)
@@ -364,14 +370,14 @@ downloads still fetch the current versions directly",
     }
 
     report.log(&format!("Requested   : {} mod(s)", mod_ids.len()));
-    report.log(&format!("To fetch    : {} via SteamCMD", pending.len()));
+    report.log(&format!("To check    : {} via SteamCMD", pending.len()));
     report.log(&format!("To delete   : {}", doomed.len()));
     report.log(&format!("Output      : {}", args.output.display()));
     report.log(&format!("SteamCMD dir: {}", args.steamcmd_dir.display()));
 
     if args.dry_run {
         for mod_id in &pending {
-            println!("Fetch {mod_id}");
+            println!("Check {mod_id}");
         }
         for action in &actions {
             println!("{:?} {}", action.action, action.mod_id);
@@ -411,12 +417,13 @@ downloads still fetch the current versions directly",
         "Batch size  : {batch_size} item(s) per SteamCMD run"
     ));
 
-    // SteamCMD can answer a download request with an empty success for an item
-    // its cache already records, so every requested item's cache is cleared
-    // first — the standard Workshop workaround that forces a fresh fetch of
-    // the current depot version. Partial downloads survive the forget step
-    // and still resume across attempts (see AGENTS.md).
-    forget_steamcmd_items(&args, &pending);
+    // SteamCMD's own version check is the live one: asking it about an item it
+    // already holds makes it compare the cached version against the live depot
+    // and download only what changed. --force-refresh skips that check by
+    // clearing each item's cache first, guaranteeing a fresh fetch.
+    if args.force_refresh {
+        forget_steamcmd_items(&args, &pending);
+    }
 
     for attempt in 1..=attempts {
         if pending.is_empty() {
@@ -473,6 +480,21 @@ downloads still fetch the current versions directly",
                 .iter()
                 .find(|entry| entry.mod_id == *mod_id)
                 .cloned();
+            // SteamCMD answers a request for an item whose cached version
+            // matches the live depot with an empty staging directory. That is
+            // its "unchanged" answer, not a failure, so long as a copy is
+            // already in place.
+            if previous.as_ref().is_some_and(|entry| {
+                let source = workshop_content_path(&args.steamcmd_dir, args.app_id, mod_id);
+                !source.is_dir()
+                    && args
+                        .output
+                        .join(resolved_directory_name(&args, entry))
+                        .is_dir()
+            }) {
+                report.log(&format!("{mod_id}: unchanged — left in place"));
+                continue;
+            }
 
             match place_requested(&args, &fresh_remote, mod_id, previous.as_ref()) {
                 Ok(entry) => {
@@ -978,6 +1000,7 @@ mod tests {
             retry_delay: 30,
             batch_size: 1,
             dry_run: false,
+            force_refresh: false,
             quiet: false,
             delete_unrequested: false,
             delete_unavailable: false,
@@ -1021,6 +1044,7 @@ mod tests {
             retry_delay: 30,
             batch_size: 1,
             dry_run: false,
+            force_refresh: false,
             quiet: false,
             delete_unrequested: false,
             delete_unavailable: false,

@@ -80,42 +80,36 @@ user to guess:
 - **Timeouts** are reported as timeouts, not as a missing download — see
   `timeout_hint`.
 
-### Workshop updates: fetch everything, every time
+### Workshop updates: SteamCMD's own check is the live one
 
-SteamCMD remembers every item it downloaded in `appworkshop_<appid>.acf`, and
-a `+workshop_download_item` for an item it considers current can print
-`Success. Downloaded item <id> to ...` while delivering nothing — the
-well-known "SteamCMD does not update Workshop mods" behaviour that server mod
-scripts (luttum and friends) work around by deleting the item's cache first.
+SteamCMD remembers every item it downloaded in `appworkshop_<appid>.acf`.
+Asked for an item, it compares that cached manifest hash against the live
+depot and either downloads the current version or answers with an empty
+success — the same version check the Steam client runs for subscriptions.
+That check is the only live per-item signal available: the public details API
+serves a cache that can sit days behind a real content update (`time_updated`
+and `hcontent_file` both), and SteamCMD's cache, seeded with its own clock,
+is not remote version data either.
 
-Holding that thought together with the Web API's caching tells you why the
-update decision can never be trusted to metadata:
+So `swmctl` asks SteamCMD about every requested mod on every run and treats
+the answer as the truth:
 
-- **The public details API lags the real depots.** `time_updated` and
-  `hcontent_file` are served from a cache that can sit days behind an actual
-  content update — Steam's own client and SteamCMD see through to the live
-  depots, the details service does not. A mod that "just updated" in the
-  launcher can show its old timestamp and handle for days, so any tool that
-  plans around those values silently skips real updates.
-- **SteamCMD's own check is unreliable as a gate.** Its skip decision depends
-  on the ACF record, which is exactly the state the workaround exists to
-  clear; and an authenticated `workshop_download_item` is the one operation
-  that does reach the live depots.
-
-So `swmctl` fetches every requested mod on every run (`forget_steamcmd_items`
-clears the app's ACF and each requested item's content directory before the
-attempt loop, forcing a fresh fetch of the current depot version). The Web
-API contributes titles, sizes and availability warnings only — never the
-update decision.
-
-- **Resumable partials survive the forget step** (`steamapps/workshop/downloads/<id>`
-  is not touched), so a timed-out item still resumes across attempts.
+- **A delivered item is placed and recorded.** An item SteamCMD already holds
+  comes back with an empty staging directory: that is "unchanged", not a
+  failure, so long as a copy is already in place (`unchanged — left in
+  place`).
+- **`--force-refresh` clears the app's ACF and each item's content directory
+  before the attempt loop**, forcing a fresh fetch of the current depot
+  version regardless of the cache. This is the community workaround (luttum
+  and friends) applied on request: it guarantees every requested mod is
+  re-downloaded, at the cost of the transfer.
+- **The Web API contributes titles, sizes and availability warnings only** —
+  never the update decision.
+- **Resumable partials survive** (`steamapps/workshop/downloads/<id>` is not
+  touched), so a timed-out item still resumes across attempts.
 - **The manifest records what was placed** — including Steam's content handle
   and timestamp when the API supplied them — so deletions and unrequested
   detection keep working, but it never gates a fetch.
-- **Cost is honest:** every run re-downloads the requested list. Raise
-  `--batch-size` to pay fewer SteamCMD startups; unchanged mods cannot be
-  skipped safely because staleness is invisible from the caller's side.
 
 ### Relative install directories
 

@@ -2,10 +2,10 @@
 
 ## Overview
 
-`swmctl` fetches every requested Workshop mod fresh through SteamCMD — the
-one operation that speaks to the live depots — reconciles the results
-against a local manifest, performs deletion checks, and renames/sanitizes
-folders so output is safe for restrictive game servers.
+`swmctl` asks SteamCMD — the one operation that speaks to the live depots —
+about every requested Workshop mod, reconciles the results against a local
+manifest, performs deletion checks, and renames/sanitizes folders so output is
+safe for restrictive game servers.
 
 ## Core workflow
 
@@ -38,15 +38,17 @@ folders so output is safe for restrictive game servers.
    Nothing is classified as Download or Update: every requested mod is
    fetched on every run (see below).
 
-3. **Fetch everything via SteamCMD**
-   Every requested mod's SteamCMD cache is cleared first — the app's ACF and
-   the item's content directory — which is the standard Workshop workaround
-   that forces `+workshop_download_item` to download the current depot
-   version rather than answer with an empty success. SteamCMD may exit
-   successfully while silently omitting individual items, so what actually
-   arrived on disk is checked per item and only the missing ones are
-   retried, up to `--max-retries`. Partial downloads in
-   `steamapps/workshop/downloads` survive the cache clear and resume.
+3. **Check every requested mod via SteamCMD**
+   Each requested mod is handed to SteamCMD, whose own version check compares
+   its cached manifest against the live depot: changed or missing items are
+   downloaded, current ones answered with an empty success that swmctl reads
+   as `unchanged — left in place`. SteamCMD may exit successfully while
+   silently omitting individual items, so what actually arrived on disk is
+   checked per item and only the missing ones are retried, up to
+   `--max-retries`. `--force-refresh` clears the app's ACF and each item's
+   content directory first, forcing a fresh fetch of the current version
+   regardless of the cache. Partial downloads in `steamapps/workshop/downloads`
+   survive and resume.
 
 4. **Place and rename**
    Once a download finishes, move the mod into:
