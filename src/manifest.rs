@@ -35,6 +35,23 @@ pub struct RemoteMod {
     pub deleted: bool,
 }
 
+impl RemoteMod {
+    /// Whether Steam's current version differs from the one `previous`
+    /// recorded. Without any version data from Steam the answer is unknown,
+    /// which counts as changed so SteamCMD gets to decide.
+    pub fn changed_since(&self, previous: &ManifestEntry) -> bool {
+        if let Some(handle) = &self.content_handle {
+            // An entry recorded without a handle predates handle tracking;
+            // checking it once records one.
+            return previous.content_handle.as_ref() != Some(handle);
+        }
+        match (self.last_updated, previous.last_updated) {
+            (Some(remote), Some(recorded)) => remote > recorded,
+            _ => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Download,
@@ -106,12 +123,17 @@ pub fn save(path: &Path, entries: &[ManifestEntry]) -> Result<(), ManifestError>
     })
 }
 
-/// The deletions to apply, per the `--delete-*` flags.
+/// What the Web API says about whether a requested mod needs fetching.
 ///
-/// Downloads and updates are not classified here: every requested mod is
-/// fetched fresh every run (see the fetch-everything contract in cli.rs), so
-/// deciding between Download and Update in advance would only risk trusting
-/// Steam's cached metadata, which lags real depot changes.
+/// New mods are downloaded. A placed mod is updated when Steam's content
+/// handle differs from the one recorded at placement, or — when no handle is
+/// available — when Steam reports a newer `time_updated`. A mod Steam told us
+/// nothing about (the API was unreachable, or the item is login-gated) cannot
+/// be judged, so it is handed to SteamCMD to check. Mods judged current are
+/// left out entirely; `--check-all` asks SteamCMD about them anyway, for the
+/// rare case where Steam's metadata lags a real content update.
+///
+/// Deletions follow the `--delete-*` flags.
 pub fn plan(
     requested_ids: &[String],
     remote: &[RemoteMod],
@@ -120,6 +142,24 @@ pub fn plan(
     delete_unavailable: bool,
 ) -> Vec<PlannedAction> {
     let mut actions = Vec::new();
+
+    for mod_id in requested_ids {
+        let current = remote.iter().find(|item| &item.mod_id == mod_id);
+        let action = match existing.iter().find(|entry| &entry.mod_id == mod_id) {
+            None => Some(Action::Download),
+            Some(previous) => current
+                .is_none_or(|item| item.changed_since(previous))
+                .then_some(Action::Update),
+        };
+        if let Some(action) = action
+            && !current.is_some_and(|item| item.deleted)
+        {
+            actions.push(PlannedAction {
+                action,
+                mod_id: mod_id.clone(),
+            });
+        }
+    }
 
     for entry in existing {
         let requested = requested_ids.iter().any(|id| id == &entry.mod_id);
@@ -177,33 +217,86 @@ mod tests {
         }
     }
 
-    #[test]
-    fn plans_only_deletions() {
-        // plan() never classifies downloads or updates: every requested mod is
-        // fetched fresh by the run loop, so nothing here may come back as
-        // Download or Update.
-        let existing = vec![entry("old"), entry("missing")];
-        let requested = vec!["old".into()];
-        let actions = plan(&requested, &[remote("old", 10, 2)], &existing, true, false);
+    fn handled(id: &str, handle: &str) -> RemoteMod {
+        RemoteMod {
+            content_handle: Some(handle.into()),
+            ..remote(id, 10, 1)
+        }
+    }
 
-        assert!(actions.iter().all(|action| action.action == Action::Delete));
-        assert!(actions.contains(&PlannedAction {
-            action: Action::Delete,
-            mod_id: "missing".into()
-        }));
-        assert!(
-            !actions.iter().any(|action| action.mod_id == "old"),
-            "a requested entry is fetched, never deleted"
+    fn with_handle(id: &str, handle: &str) -> ManifestEntry {
+        ManifestEntry {
+            content_handle: Some(handle.into()),
+            ..entry(id)
+        }
+    }
+
+    fn fetched(actions: &[PlannedAction]) -> Vec<(Action, &str)> {
+        actions
+            .iter()
+            .filter(|action| action.action != Action::Delete)
+            .map(|action| (action.action, action.mod_id.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn only_new_and_changed_mods_are_fetched() {
+        let existing = vec![with_handle("same", "A"), with_handle("changed", "A")];
+        let requested = vec!["same".into(), "changed".into(), "new".into()];
+        let remote = vec![
+            handled("same", "A"),
+            handled("changed", "B"),
+            handled("new", "C"),
+        ];
+        let actions = plan(&requested, &remote, &existing, false, false);
+
+        assert_eq!(
+            fetched(&actions),
+            vec![(Action::Update, "changed"), (Action::Download, "new")]
         );
     }
 
     #[test]
-    fn without_delete_flags_nothing_is_planned() {
+    fn falls_back_to_the_update_time_without_a_content_handle() {
+        let existing = vec![entry("same"), entry("newer")];
+        let requested = vec!["same".into(), "newer".into()];
+        let remote = vec![remote("same", 10, 1), remote("newer", 10, 2)];
+        let actions = plan(&requested, &remote, &existing, false, false);
+
+        assert_eq!(fetched(&actions), vec![(Action::Update, "newer")]);
+    }
+
+    #[test]
+    fn mods_without_version_data_are_checked() {
+        // No handle recorded yet (older manifest), or no word from Steam at
+        // all: SteamCMD decides.
+        let existing = vec![entry("unrecorded"), entry("unknown")];
+        let requested = vec!["unrecorded".into(), "unknown".into()];
+        let remote = vec![
+            handled("unrecorded", "A"),
+            RemoteMod {
+                last_updated: None,
+                ..remote("unknown", 0, 0)
+            },
+        ];
+        let actions = plan(&requested, &remote, &existing, false, false);
+
+        assert_eq!(fetched(&actions).len(), 2);
+    }
+
+    #[test]
+    fn plans_configurable_delete() {
         let existing = vec![entry("old"), entry("missing")];
         let requested = vec!["old".into()];
-        let actions = plan(&requested, &[remote("old", 10, 2)], &existing, false, false);
+        let actions = plan(&requested, &[remote("old", 10, 1)], &existing, true, false);
 
-        assert!(actions.is_empty());
+        assert_eq!(
+            actions,
+            vec![PlannedAction {
+                action: Action::Delete,
+                mod_id: "missing".into()
+            }]
+        );
     }
 
     /// Regression for the `--delete-unavailable` data-loss bug: a mod that is
