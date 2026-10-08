@@ -4,12 +4,13 @@
 
 `swmctl` is a command-line tool for keeping Steam Workshop mods synchronized with a local game-server directory.
 
-It verifies every requested mod through SteamCMD, the one operation that talks to the live depots, because Steam's public metadata can lag real Workshop updates by days. Changed mods download; current ones are left in place. A local JSON manifest records what was placed and drives deletion checks.
+Each run compares Steam's Workshop metadata against a local JSON manifest and hands SteamCMD only the mods that are new or changed, so an update touches only what needs it. The manifest records what was placed and also drives deletion checks.
 
 ## Features
 
 - Download the current version of Workshop mods by ID.
-- Verify every mod through SteamCMD itself, which compares its cache against the live depot and downloads only what changed.
+- Fetch only new and changed mods, judged by Steam's content handle (falling back to its update time).
+- Ask SteamCMD about every mod with `--check-all` when Steam's metadata seems to lag a real update.
 - Record placed mods in a local minified JSON manifest.
 - Force a full re-fetch with `--force-refresh` when a guaranteed refresh is wanted.
 - Remove mods no longer requested, with independent deletion checks.
@@ -122,11 +123,11 @@ Use `--dry-run` to preview planned actions before running for real.
 
 ### Other options
 
-Useful options include `--output`, `--manifest`, `--steamcmd`, `--steamcmd-dir`, `--name-mode`, `--name-prefix`, `--max-retries`, `--retry-delay`, `--batch-size`, `--dry-run`, and `--quiet`.
+Useful options include `--output`, `--manifest`, `--steamcmd`, `--steamcmd-dir`, `--name-mode`, `--name-prefix`, `--max-retries`, `--retry-delay`, `--batch-size`, `--check-all`, `--force-refresh`, `--dry-run`, and `--quiet`.
 
-`--batch-size` sets how many Workshop items are handed to a single SteamCMD invocation. It defaults to `1`; raise it to pay fewer SteamCMD startups on large presets. Each run asks SteamCMD about every requested mod and downloads only the ones whose files changed — mods SteamCMD already holds are reported `unchanged — left in place`. `--force-refresh` clears SteamCMD's cache for every requested mod first, forcing a fresh fetch of each. `--dry-run` lists exactly what a run would check and delete.
+`--batch-size` sets how many Workshop items are handed to a single SteamCMD invocation. It defaults to `1`; raise it to pay fewer SteamCMD startups on large presets. Each run fetches only mods that are new, changed on Steam (a different content handle, or a newer update time when no handle is available), or missing from the output directory. If the Web API cannot be reached, every mod is checked through SteamCMD instead. `--check-all` asks SteamCMD about every requested mod after the changed ones; SteamCMD compares its cache against the live depot, and mods that are already current are reported `unchanged — left in place`. `--force-refresh` clears SteamCMD's cache for every requested mod first, forcing a fresh fetch of each (it implies `--check-all`). `--dry-run` lists exactly what a run would download, update, check and delete.
 
-The Steam Web API base URL is overridable with the `SWMCTL_API_BASE_URL` environment variable, for mirrors and API gateways. Its data (titles, sizes, availability) is informational; downloads always come from SteamCMD regardless of the API's state.
+The Steam Web API base URL is overridable with the `SWMCTL_API_BASE_URL` environment variable, for mirrors and API gateways. Its data (titles, sizes, availability, versions) decides which mods are fetched; the downloads themselves always come from SteamCMD.
 
 ## Authentication
 

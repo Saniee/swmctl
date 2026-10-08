@@ -79,9 +79,13 @@ pub struct SyncArgs {
     /// Report the planned actions without downloading, moving, or deleting.
     #[arg(long)]
     pub dry_run: bool,
+    /// Ask SteamCMD about every requested mod, not just the ones Steam reports
+    /// as new or changed. Mods Steam flags are still checked first. Use it if
+    /// Steam's metadata appears to lag a Workshop update.
+    #[arg(long)]
+    pub check_all: bool,
     /// Re-fetch every requested mod from scratch, clearing SteamCMD's cache
-    /// for each first. Without it, SteamCMD skips mods whose cached version
-    /// already matches the live depot, so only changed mods download.
+    /// for each first. Implies --check-all.
     #[arg(long)]
     pub force_refresh: bool,
     /// Suppress progress output. Errors and warnings are still reported.
@@ -120,6 +124,7 @@ impl fmt::Debug for SyncArgs {
             .field("retry_delay", &self.retry_delay)
             .field("batch_size", &self.batch_size)
             .field("dry_run", &self.dry_run)
+            .field("check_all", &self.check_all)
             .field("force_refresh", &self.force_refresh)
             .field("quiet", &self.quiet)
             .field("delete_unrequested", &self.delete_unrequested)
@@ -314,17 +319,10 @@ fn run_sync(mut args: SyncArgs) -> Result<(), Error> {
         report.warn("skipping --delete-unavailable: Workshop metadata is unavailable this run");
     }
 
-    // The Web API's metadata is a cached record that can lag real depot
-    // changes by days — Steam's own client and SteamCMD see through to the
-    // live depots, the public details service does not. Its data is used for
-    // names, sizes and availability warnings only, never as the update
-    // decision: every requested mod is fetched fresh on every run, with its
-    // SteamCMD cache cleared first, so SteamCMD always downloads the current
-    // depot version.
     if !api_available {
         report.warn(
-            "Workshop titles and sizes are unavailable (the metadata API is unreachable); \
-downloads still fetch the current versions directly",
+            "Workshop versions are unavailable (the metadata API is unreachable); \
+every requested mod is checked through SteamCMD instead",
         );
     }
 
@@ -341,20 +339,45 @@ downloads still fetch the current versions directly",
         .filter(|action| action.action == Action::Delete)
         .map(|action| action.mod_id.clone())
         .collect::<Vec<_>>();
-    // Everything requested is fetched, except the items already doomed.
-    // Largest first, so the longest transfers are not left stalled at the end.
+    // Only new and changed mods are fetched, plus any recorded mod whose
+    // directory has gone missing from the output.
     let mut pending = mod_ids
         .iter()
         .filter(|mod_id| !doomed.contains(mod_id))
+        .filter(|mod_id| {
+            actions.iter().any(|action| {
+                action.mod_id == **mod_id
+                    && matches!(action.action, Action::Download | Action::Update)
+            }) || entries.iter().any(|entry| {
+                entry.mod_id == **mod_id
+                    && !args
+                        .output
+                        .join(resolved_directory_name(&args, entry))
+                        .is_dir()
+            })
+        })
         .cloned()
         .collect::<Vec<_>>();
-    pending.sort_by_key(|mod_id| {
-        u64::MAX
-            - remote
-                .iter()
-                .find(|item| item.mod_id == *mod_id)
-                .map_or(0, |item| item.file_size)
-    });
+    let flagged = pending.len();
+    let size_of = |mod_id: &String| {
+        remote
+            .iter()
+            .find(|item| item.mod_id == *mod_id)
+            .map_or(0, |item| item.file_size)
+    };
+    // Largest first, so the longest transfers are not left stalled at the end.
+    pending.sort_by_key(|mod_id| u64::MAX - size_of(mod_id));
+    // --check-all appends the mods Steam reports as current, after the ones
+    // that are known to need work.
+    if args.check_all || args.force_refresh {
+        let mut rest = mod_ids
+            .iter()
+            .filter(|mod_id| !pending.contains(mod_id) && !doomed.contains(mod_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        rest.sort_by_key(|mod_id| u64::MAX - size_of(mod_id));
+        pending.extend(rest);
+    }
 
     // The script's "in state but not in preset" warning: surface drift even
     // when the user has not opted into deletion.
@@ -370,13 +393,19 @@ downloads still fetch the current versions directly",
     }
 
     report.log(&format!("Requested   : {} mod(s)", mod_ids.len()));
-    report.log(&format!("To check    : {} via SteamCMD", pending.len()));
+    report.log(&format!("To fetch    : {flagged} new or changed"));
+    if pending.len() > flagged {
+        report.log(&format!(
+            "To check    : {} more via SteamCMD",
+            pending.len() - flagged
+        ));
+    }
     report.log(&format!("To delete   : {}", doomed.len()));
     report.log(&format!("Output      : {}", args.output.display()));
     report.log(&format!("SteamCMD dir: {}", args.steamcmd_dir.display()));
 
     if args.dry_run {
-        for mod_id in &pending {
+        for mod_id in pending.iter().skip(flagged) {
             println!("Check {mod_id}");
         }
         for action in &actions {
@@ -417,10 +446,8 @@ downloads still fetch the current versions directly",
         "Batch size  : {batch_size} item(s) per SteamCMD run"
     ));
 
-    // SteamCMD's own version check is the live one: asking it about an item it
-    // already holds makes it compare the cached version against the live depot
-    // and download only what changed. --force-refresh skips that check by
-    // clearing each item's cache first, guaranteeing a fresh fetch.
+    // --force-refresh clears each item's SteamCMD cache first, guaranteeing a
+    // fresh fetch instead of SteamCMD's own "already current" answer.
     if args.force_refresh {
         forget_steamcmd_items(&args, &pending);
     }
@@ -484,7 +511,7 @@ downloads still fetch the current versions directly",
             // matches the live depot with an empty staging directory. That is
             // its "unchanged" answer, not a failure, so long as a copy is
             // already in place.
-            if previous.as_ref().is_some_and(|entry| {
+            if let Some(entry) = previous.as_ref().filter(|entry| {
                 let source = workshop_content_path(&args.steamcmd_dir, args.app_id, mod_id);
                 !source.is_dir()
                     && args
@@ -493,6 +520,16 @@ downloads still fetch the current versions directly",
                         .is_dir()
             }) {
                 report.log(&format!("{mod_id}: unchanged — left in place"));
+                // Record the version Steam reports, so a mod flagged only
+                // because its recorded version was missing or stale is not
+                // flagged again next run.
+                if let Some(item) = fresh_remote.iter().find(|item| item.mod_id == *mod_id) {
+                    let mut entry = entry.clone();
+                    entry.last_updated = item.last_updated.or(entry.last_updated);
+                    entry.content_handle = item.content_handle.clone().or(entry.content_handle);
+                    entries.retain(|existing| existing.mod_id != *mod_id);
+                    entries.push(entry);
+                }
                 continue;
             }
 
@@ -1000,6 +1037,7 @@ mod tests {
             retry_delay: 30,
             batch_size: 1,
             dry_run: false,
+            check_all: false,
             force_refresh: false,
             quiet: false,
             delete_unrequested: false,
@@ -1044,6 +1082,7 @@ mod tests {
             retry_delay: 30,
             batch_size: 1,
             dry_run: false,
+            check_all: false,
             force_refresh: false,
             quiet: false,
             delete_unrequested: false,

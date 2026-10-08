@@ -80,36 +80,36 @@ user to guess:
 - **Timeouts** are reported as timeouts, not as a missing download — see
   `timeout_hint`.
 
-### Workshop updates: SteamCMD's own check is the live one
+### Workshop updates: Web API decides, SteamCMD verifies on request
 
-SteamCMD remembers every item it downloaded in `appworkshop_<appid>.acf`.
-Asked for an item, it compares that cached manifest hash against the live
-depot and either downloads the current version or answers with an empty
-success — the same version check the Steam client runs for subscriptions.
-That check is the only live per-item signal available: the public details API
-serves a cache that can sit days behind a real content update (`time_updated`
-and `hcontent_file` both), and SteamCMD's cache, seeded with its own clock,
-is not remote version data either.
+Asking SteamCMD about every requested mod on every run (the approach taken in
+the "Fix Update*" commits) made updates unusable on real presets. With
+`--batch-size 1`, each mod costs a full SteamCMD startup and login, so a
+100-mod Arma preset spends a long time confirming current mods before it
+reaches the few that changed. So the update decision is back on the Web API:
 
-So `swmctl` asks SteamCMD about every requested mod on every run and treats
-the answer as the truth:
-
-- **A delivered item is placed and recorded.** An item SteamCMD already holds
-  comes back with an empty staging directory: that is "unchanged", not a
-  failure, so long as a copy is already in place (`unchanged — left in
-  place`).
-- **`--force-refresh` clears the app's ACF and each item's content directory
-  before the attempt loop**, forcing a fresh fetch of the current depot
-  version regardless of the cache. This is the community workaround (luttum
-  and friends) applied on request: it guarantees every requested mod is
-  re-downloaded, at the cost of the transfer.
-- **The Web API contributes titles, sizes and availability warnings only** —
-  never the update decision.
+- **`plan` flags Download / Update from the API.** A mod is updated when
+  `hcontent_file` differs from the handle recorded in the manifest, or, with no
+  handle, when `time_updated` is newer than the recorded time
+  (`RemoteMod::changed_since`). An entry recorded without a handle (an older
+  manifest) is checked once, and the handle is recorded then. A mod the API
+  says nothing about (API unreachable, login-gated item) is handed to
+  SteamCMD. A recorded mod whose output directory is gone is re-fetched.
+- **Never record SteamCMD's ACF timestamps as versions.** They are seeded
+  with SteamCMD's own clock. A manifest holding one claims a newer version
+  than Steam ever published, and the time comparison never fires again.
+- **`--check-all` covers a lagging API.** The details API serves a cache
+  that can trail a real content update. `--check-all` appends every other
+  requested mod after the flagged ones, so SteamCMD's live check (cached
+  manifest hash against the depot) gets the final word. `--force-refresh`
+  implies it and also clears the app's ACF and each item's content directory
+  first, forcing a full re-download.
+- **"Unchanged" is a valid answer.** An item SteamCMD already holds comes back
+  with an empty staging directory. If a copy is already in place, that means
+  `unchanged — left in place`, not a failure. The API's current version is
+  recorded so the mod is not flagged again next run.
 - **Resumable partials survive** (`steamapps/workshop/downloads/<id>` is not
   touched), so a timed-out item still resumes across attempts.
-- **The manifest records what was placed** — including Steam's content handle
-  and timestamp when the API supplied them — so deletions and unrequested
-  detection keep working, but it never gates a fetch.
 
 ### Relative install directories
 

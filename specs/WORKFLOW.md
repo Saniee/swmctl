@@ -20,29 +20,33 @@ safe for restrictive game servers.
    private and login-gated items are invisible to it; such items are treated
    as *unknown*, never as unavailable, so they are never deleted.
 
-   **The API's version fields are never trusted as an update signal.** The
-   details service serves a cache that can lag real depot changes by days
-   (`time_updated` and `hcontent_file` both), so anything decided from them
-   silently skips real updates. SteamCMD's `appworkshop_<appid>.acf`
-   contributes only a size fallback.
+   **The API's version fields decide which mods are fetched.** A mod is
+   updated when `hcontent_file` differs from the handle recorded in the
+   manifest, or, without a handle, when `time_updated` is newer than the
+   recorded one. A mod the API says nothing about is checked through SteamCMD.
+   SteamCMD's `appworkshop_<appid>.acf` contributes only a size fallback. Its
+   timestamps come from SteamCMD's own clock, so they are never recorded as
+   versions.
 
-2. **Classify deletions**
-   Compare the manifest against the requested list and the fetched metadata,
-   and plan only deletions:
+2. **Classify downloads, updates and deletions**
+   Compare the manifest against the requested list and the fetched metadata:
+   - Requested but not in the manifest: Download.
+   - Steam reports a different version than the one recorded, or the
+     recorded directory is missing: Update.
    - Managed but not in the requested list — removed with
      `--delete-unrequested`.
    - Reported deleted by the Workshop — removed with `--delete-unavailable`.
    Each check is independently configurable (on/off), and a mod absent from
    the current request is never treated as unavailable.
 
-   Nothing is classified as Download or Update: every requested mod is
-   fetched on every run (see below).
-
-3. **Check every requested mod via SteamCMD**
-   Each requested mod is handed to SteamCMD, whose own version check compares
-   its cached manifest against the live depot: changed or missing items are
-   downloaded, current ones answered with an empty success that swmctl reads
-   as `unchanged — left in place`. SteamCMD may exit successfully while
+3. **Fetch via SteamCMD**
+   Downloads and updates are handed to SteamCMD, largest first. With
+   `--check-all`, the remaining requested mods follow, so a lagging API cannot
+   hide an update. SteamCMD's own version check compares its cached manifest
+   against the live depot: changed or missing items are downloaded, and
+   current ones get an empty success that swmctl reads as
+   `unchanged — left in place` (recording Steam's reported version so the mod
+   is not flagged again). SteamCMD may exit successfully while
    silently omitting individual items, so what actually arrived on disk is
    checked per item and only the missing ones are retried, up to
    `--max-retries`. `--force-refresh` clears the app's ACF and each item's
@@ -87,7 +91,7 @@ a straightforward follow-up without changing the schema.
 - Mod ID
 - File size (used to order fetches)
 - Steam content handle and update timestamp when the API supplied them
-  (informational; never gates a fetch)
+  (compared against Steam's on the next run to decide updates)
 
 ## Configurable via arguments
 
